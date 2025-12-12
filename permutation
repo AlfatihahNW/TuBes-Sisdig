@@ -1,0 +1,99 @@
+
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+
+entity ascon_permutation is
+    Port ( 
+        clk         : in  STD_LOGIC;
+        rst_n       : in  STD_LOGIC;
+        start       : in  STD_LOGIC;
+        round_mode  : in  STD_LOGIC; 
+        state_in    : in  std_logic_vector (319 downto 0);
+        state_out   : out std_logic_vector (319 downto 0);
+        done        : out std_logic
+    );
+end ascon_permutation;
+
+architecture Behavioral of ascon_permutation is
+
+    signal x0, x1, x2, x3, x4 : std_logic_vector(63 downto 0);
+    signal next_x0, next_x1, next_x2, next_x3, next_x4 : std_logic_vector(63 downto 0);
+	 
+	 -- state internal permutasi
+    type state_type is (IDLE, CALC_ROUND);
+    signal curr_state : state_type := IDLE;
+    signal round_ctr : integer range 0 to 15;
+    
+    -- Konstanta & Sinyal Logic
+    type round_const_arr is array (0 to 11) of std_logic_vector(7 downto 0);
+    constant C_ROUNDS : round_const_arr := (
+        x"f0", x"e1", x"d2", x"c3", x"b4", x"a5", 
+        x"96", x"87", x"78", x"69", x"5a", x"4b"
+    );
+    signal rc : std_logic_vector(63 downto 0);
+    signal a0, a1, a2, a3, a4, b0, b1, b2, b3, b4, s0, s1, s2, s3, s4 : std_logic_vector(63 downto 0);
+
+begin
+
+    process(clk, rst_n)
+    begin
+        if rst_n = '0' then
+            x0 <= (others => '0'); x1 <= (others => '0'); x2 <= (others => '0');
+            x3 <= (others => '0'); x4 <= (others => '0');
+            round_ctr <= 0;
+            curr_state <= IDLE;
+            done <= '0';
+            
+        elsif rising_edge(clk) then
+            done <= '0';
+
+            case curr_state is
+                when IDLE =>
+                    if start = '1' then
+                        -- Load & Start
+                        x0 <= state_in(319 downto 256);
+                        x1 <= state_in(255 downto 192);
+                        x2 <= state_in(191 downto 128);
+                        x3 <= state_in(127 downto 64);
+                        x4 <= state_in(63 downto 0);
+                        
+                        if round_mode = '0' then round_ctr <= 0;
+                        else round_ctr <= 4; end if;
+                        
+                        curr_state <= CALC_ROUND;
+                    end if;
+
+                when CALC_ROUND =>
+                    -- Update State
+                    x0 <= next_x0; x1 <= next_x1; x2 <= next_x2;
+                    x3 <= next_x3; x4 <= next_x4;
+
+                    -- Cek loop 12 kali (0 sampai 11)
+                    if round_ctr = 11 then
+                        curr_state <= IDLE;
+                        done <= '1';
+                    else
+                        round_ctr <= round_ctr + 1;
+                    end if;
+            end case;
+        end if;
+    end process;
+
+    rc <= x"00000000000000" & C_ROUNDS(round_ctr);
+    a0 <= x0 XOR x4; a1 <= x1; a2 <= x2 XOR x1 XOR rc; a3 <= x3; a4 <= x4 XOR x3;
+    b0 <= a0 XOR ((NOT a1) AND a2); b1 <= a1 XOR ((NOT a2) AND a3); 
+    b2 <= a2 XOR ((NOT a3) AND a4); b3 <= a3 XOR ((NOT a4) AND a0); 
+    b4 <= a4 XOR ((NOT a0) AND a1);
+    s0 <= b0 XOR b4; s1 <= b1 XOR b0; s2 <= NOT b2; s3 <= b3 XOR b2; s4 <= b4;
+    
+    next_x0 <= s0 XOR (s0(18 downto 0) & s0(63 downto 19)) XOR (s0(27 downto 0) & s0(63 downto 28));
+    next_x1 <= s1 XOR (s1(60 downto 0) & s1(63 downto 61)) XOR (s1(38 downto 0) & s1(63 downto 39));
+    next_x2 <= s2 XOR (s2(0 downto 0)  & s2(63 downto 1))  XOR (s2(5 downto 0)  & s2(63 downto 6));
+    next_x3 <= s3 XOR (s3(9 downto 0)  & s3(63 downto 10)) XOR (s3(16 downto 0) & s3(63 downto 17));
+    next_x4 <= s4 XOR (s4(6 downto 0)  & s4(63 downto 7))  XOR (s4(40 downto 0) & s4(63 downto 41));
+
+    state_out <= x0 & x1 & x2 & x3 & x4;
+
+end Behavioral;
