@@ -1,0 +1,70 @@
+
+
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use work.ascon_pkg.ALL;
+
+entity ascon_datapath is
+    Port (
+        clk, rst_n, en_SI, is_decrypt, en_xor_lsb, start_perm, round_mode, data_select : in STD_LOGIC;
+        mux_sel : in STD_LOGIC_VECTOR(2 downto 0);
+        in_key, in_nonce, in_ad, in_tag : in STD_LOGIC_VECTOR(127 downto 0);
+        in_data : in STD_LOGIC_VECTOR(255 downto 0);
+        perm_done, tag_valid : out STD_LOGIC;
+        out_data, out_tag : out STD_LOGIC_VECTOR(127 downto 0)
+    );
+end ascon_datapath;
+
+architecture Behavioral of ascon_datapath is
+    signal S, perm_out_wire : std_logic_vector(319 downto 0);
+    signal current_data_chunk, xor_result : std_logic_vector(127 downto 0);
+begin
+    -- Permutation Instance
+    inst_perm : entity work.ascon_permutation port map (
+        clk => clk, rst_n => rst_n, start => start_perm, round_mode => round_mode,
+        state_in => S, state_out => perm_out_wire, done => perm_done
+    );
+
+    -- Data Mux (Chunk 1 vs Chunk 2)
+    current_data_chunk <= in_data(255 downto 128) when data_select = '0' else in_data(127 downto 0);
+
+    -- State Update Process
+    process(clk, rst_n)
+    begin
+        if rst_n = '0' then S <= (others => '0');
+        elsif rising_edge(clk) then
+            if en_SI = '1' then
+                case mux_sel is
+                    when "000" => -- Init
+                        S <= ASCON_IV & in_key & in_nonce;
+                    when "001" => -- Hasil permutasi
+                        S <= perm_out_wire;
+                    when "010" => -- XOR AD (Rate 128-bit: x0, x1)
+                        S(319 downto 192) <= S(319 downto 192) XOR in_ad;
+                    when "011" => -- Process Data (Rate 128-bit: x0, x1)
+                        if is_decrypt = '0' then
+                            S(319 downto 192) <= S(319 downto 192) XOR current_data_chunk;
+                        else
+                            S(319 downto 192) <= current_data_chunk;
+                        end if;
+                    when "101" => 
+                        S(191 downto 64) <= S(191 downto 64) XOR in_key; 
+
+                    when "100" => 
+                        S(127 downto 0) <= S(127 downto 0) XOR in_key; 
+                        
+                    when others => null;
+                end case;
+            elsif en_xor_lsb = '1' then
+                S(0) <= S(0) XOR '1';
+            end if;
+        end if;
+    end process;
+
+    -- Output Logic
+    xor_result <= S(319 downto 192) XOR current_data_chunk;
+    out_data   <= xor_result;
+    out_tag    <= S(127 downto 0);
+    tag_valid  <= '1' when (S(127 downto 0) = in_tag) else '0';
+end Behavioral;
