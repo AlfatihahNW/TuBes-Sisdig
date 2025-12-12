@@ -1,0 +1,201 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.NUMERIC_STD.ALL;
+use work.ascon_pkg.ALL;
+
+entity ascon_top is
+    Port ( 
+        -- --- CLOCK & RESET ---
+        clk           : in  STD_LOGIC; -- Clock 50 MHz
+        rst_n         : in  STD_LOGIC; -- Tombol Reset (Active Low)
+        
+        -- --- KOMUNIKASI SERIAL (UART) ---
+        uart_rx_pin   : in  STD_LOGIC; -- Pin RX (Terima dari PC)
+        uart_tx_pin   : out STD_LOGIC; -- Pin TX (Kirim ke PC)
+        
+        -- --- TOMBOL KONTROL ---
+        btn_encrypt   : in  STD_LOGIC; -- Tombol Mulai Enkripsi
+        btn_decrypt   : in  STD_LOGIC; -- Tombol Mulai Dekripsi
+        
+        -- --- LAMPU INDIKATOR (LED) ---
+        led_loading   : out STD_LOGIC; 
+        led_process   : out STD_LOGIC; 
+        led_ready     : out STD_LOGIC  
+    );
+end ascon_top;
+
+architecture Behavioral of ascon_top is
+
+    -- ... (Deklarasi Signal sama seperti sebelumnya) ...
+    signal w_rx_dv        : std_logic;
+    signal w_rx_byte      : std_logic_vector(7 downto 0);
+    signal w_key          : std_logic_vector(127 downto 0);
+    signal w_nonce        : std_logic_vector(127 downto 0);
+    signal w_ad           : std_logic_vector(127 downto 0);
+    signal w_data_in      : std_logic_vector(255 downto 0);
+    signal w_tag_in       : std_logic_vector(127 downto 0);
+    signal w_buffer_full : std_logic;
+    signal w_is_short_msg : std_logic; 
+    
+    signal w_en_si        : std_logic;
+    signal w_mux_sel      : std_logic_vector(2 downto 0);
+    signal w_is_decrypt   : std_logic;
+    signal w_en_xor_lsb   : std_logic;
+    signal w_data_select : std_logic;
+    signal w_start_perm   : std_logic;
+    signal w_round_mode   : std_logic;
+    signal w_perm_done    : std_logic;
+    signal w_tag_valid    : std_logic;
+    signal w_out_data     : std_logic_vector(127 downto 0);
+    signal w_out_tag      : std_logic_vector(127 downto 0);
+    signal w_ctrl_done    : std_logic; 
+    signal w_ctrl_error   : std_logic; 
+    
+    signal r_result_data : std_logic_vector(255 downto 0);
+    signal r_result_tag  : std_logic_vector(127 downto 0);
+    
+    type tx_state_type is (TX_IDLE, TX_LOAD_MSG, TX_LOAD_ERROR, TX_SENDING, TX_WAIT_BYTE, TX_DONE);
+    signal tx_state       : tx_state_type := TX_IDLE;
+    
+    signal tx_byte_cnt    : integer range 0 to 63; 
+    signal tx_data_buffer : std_logic_vector(383 downto 0); 
+    signal tx_total_bytes : integer range 0 to 64; 
+    signal w_tx_start     : std_logic;
+    signal w_tx_byte      : std_logic_vector(7 downto 0);
+    signal w_tx_done_tick: std_logic;
+    signal w_tx_busy      : std_logic;
+
+    constant MSG_ERROR_HEX : std_logic_vector(119 downto 0) := x"54616720546964616B2056616C6964"; 
+    
+    signal w_btn_encrypt_db : std_logic;
+    signal w_btn_decrypt_db : std_logic;
+
+begin
+    -- ... (Instansiasi Debouncer, UART RX, Buffer, Datapath, Controller SAMA) ...
+    
+    inst_db_enc : entity work.debouncer
+    port map ( clk => clk, rst_n => rst_n, btn_in => not btn_encrypt, btn_out => w_btn_encrypt_db );
+
+    inst_db_dec : entity work.debouncer
+    port map ( clk => clk, rst_n => rst_n, btn_in => not btn_decrypt, btn_out => w_btn_decrypt_db );
+    
+    inst_uart_rx : entity work.uart_rx 
+    port map ( i_Clk => clk, i_Rst_n => rst_n, i_RX_Serial => uart_rx_pin, o_RX_DV => w_rx_dv, o_RX_Byte => w_rx_byte );
+    
+    inst_buffer : entity work.input_buffer 
+    port map (
+        clk => clk, rst_n => rst_n, rx_data => w_rx_byte, rx_valid => w_rx_dv,
+        reg_key => w_key, reg_nonce => w_nonce, reg_ad => w_ad, reg_data => w_data_in, reg_tag_in => w_tag_in, buffer_full => w_buffer_full,
+        o_is_short_msg => w_is_short_msg 
+    );
+    
+    led_loading <= not w_buffer_full; 
+    
+    inst_datapath : entity work.ascon_datapath 
+    port map (
+        clk => clk, rst_n => rst_n, en_SI => w_en_si, mux_sel => w_mux_sel, is_decrypt => w_is_decrypt, en_xor_lsb => w_en_xor_lsb,
+        start_perm => w_start_perm, round_mode => w_round_mode, perm_done => w_perm_done, in_key => w_key, in_nonce => w_nonce,
+        in_ad => w_ad, in_data => w_data_in, in_tag => w_tag_in, data_select => w_data_select, out_data => w_out_data, out_tag => w_out_tag, tag_valid => w_tag_valid
+    );
+    
+    inst_uart_tx : entity work.uart_tx 
+    port map ( i_Clk => clk, i_Rst_n => rst_n, i_TX_DV => w_tx_start, i_TX_Byte => w_tx_byte, o_TX_Active => w_tx_busy, o_TX_Serial => uart_tx_pin, o_TX_Done => w_tx_done_tick );
+
+    inst_controller : entity work.ascon_controller
+    port map (
+        clk => clk, rst_n => rst_n, buffer_full => w_buffer_full, btn_encrypt => w_btn_encrypt_db, btn_decrypt => w_btn_decrypt_db, 
+        perm_done => w_perm_done, tag_valid => w_tag_valid, en_SI => w_en_si, mux_sel => w_mux_sel, is_decrypt => w_is_decrypt,
+        en_xor_lsb => w_en_xor_lsb, data_select => w_data_select, start_perm => w_start_perm, round_mode => w_round_mode,
+        led_busy => led_process, led_done => w_ctrl_done, status_error => w_ctrl_error, is_short_msg => w_is_short_msg 
+    );
+    
+    -- PENYIMPAN HASIL (DENGAN RESET)
+    process(clk, rst_n)
+    begin
+        if rst_n = '0' then
+            r_result_data <= (others => '0');
+            r_result_tag  <= (others => '0');
+        elsif rising_edge(clk) then
+            if w_en_si = '1' and w_mux_sel = "011" and w_data_select = '0' then
+                r_result_data(255 downto 128) <= w_out_data;
+            end if;
+            if w_en_si = '1' and w_mux_sel = "011" and w_data_select = '1' then
+                r_result_data(127 downto 0) <= w_out_data;
+            end if;
+            if w_ctrl_done = '1' then 
+                r_result_tag <= w_out_tag; 
+            end if;
+        end if;
+    end process;
+
+    -- TX SERIALIZER (PERBAIKAN UTAMA DI SINI)
+    process(clk, rst_n)
+    begin
+        if rst_n = '0' then
+            tx_state       <= TX_IDLE;
+            tx_byte_cnt    <= 0;
+            w_tx_start     <= '0';
+            tx_data_buffer <= (others => '0');
+            led_ready      <= '0';
+            
+        elsif rising_edge(clk) then
+            w_tx_start <= '0';
+            
+            case tx_state is
+                
+                when TX_IDLE =>
+                    tx_byte_cnt <= 0;
+                    led_ready   <= '0';
+                    
+                    if w_ctrl_done = '1' then
+                        -- >>> PERBAIKAN: FORCE 32 BYTE OUTPUT (Fixed 128-bit Mode) <<<
+                        -- Kita mengabaikan logika short/long message di sini.
+                        -- Selalu ambil Data Blok 1 (128-bit) dan Tag (128-bit).
+                        
+                        -- Slot 1: Data (Ciphertext/Plaintext)
+                        tx_data_buffer(383 downto 256) <= r_result_data(255 downto 128); 
+                        -- Slot 2: Tag
+                        tx_data_buffer(255 downto 128) <= r_result_tag;
+                        
+                        -- Set Total Kirim: 32 Byte
+                        tx_total_bytes <= 32;
+                        
+                        tx_state <= TX_LOAD_MSG;
+                        
+                    elsif w_ctrl_error = '1' then
+                        tx_data_buffer(383 downto 264) <= MSG_ERROR_HEX; 
+                        tx_total_bytes <= 15;
+                        tx_state       <= TX_LOAD_ERROR;
+                    end if;
+
+                when TX_LOAD_MSG | TX_LOAD_ERROR =>
+                    led_ready <= '1';
+                    tx_state  <= TX_SENDING;
+
+                when TX_SENDING =>
+                    -- Logika pengiriman (MSB First secara global, tapi per-byte)
+                    w_tx_byte  <= tx_data_buffer(383 - (tx_byte_cnt * 8) downto 383 - (tx_byte_cnt * 8) - 7);
+                    w_tx_start <= '1';
+                    tx_state   <= TX_WAIT_BYTE;
+
+                when TX_WAIT_BYTE =>
+                    if w_tx_done_tick = '1' then
+                        if tx_byte_cnt = (tx_total_bytes - 1) then
+                            tx_state <= TX_DONE;
+                        else
+                            tx_byte_cnt <= tx_byte_cnt + 1;
+                            tx_state    <= TX_SENDING;
+                        end if;
+                    end if;
+
+                when TX_DONE =>
+                    led_ready <= '1';
+                    -- Idle sampai reset
+                    
+                when others =>
+                    tx_state <= TX_IDLE;
+            end case;
+        end if;
+    end process;
+
+end Behavioral;
