@@ -1,0 +1,15 @@
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+package ascon_pkg is
+    -- IV ASCON-128 (Sesuai Test Vector kamu)
+    constant ASCON_IV : std_logic_vector(63 downto 0) := x"80800c0800000000";
+
+    -- Array Konstanta Ronde
+    type round_const_array is array (0 to 11) of std_logic_vector(7 downto 0);
+    constant ROUND_CONSTANTS : round_const_array := (
+        x"f0", x"e1", x"d2", x"c3", x"b4", x"a5", 
+        x"96", x"87", x"78", x"69", x"5a", x"4b"
+    );
+end package ascon_pkg;
