@@ -4,70 +4,121 @@ use work.ascon_pkg.ALL;
 
 entity ascon_datapath is
     Port (
-        clk, rst_n, en_SI, is_decrypt, en_xor_lsb, start_perm, round_mode, data_select : in STD_LOGIC;
-        mux_sel : in STD_LOGIC_VECTOR(2 downto 0);
-        in_key, in_nonce, in_ad, in_tag : in STD_LOGIC_VECTOR(127 downto 0);
-        in_data : in STD_LOGIC_VECTOR(255 downto 0);--MUNGKIN NGGAK USAH 256
-        perm_done, tag_valid : out STD_LOGIC;
-        out_data, out_tag : out STD_LOGIC_VECTOR(127 downto 0)
+        clk, rst_n        : in STD_LOGIC;
+        en_SI             : in STD_LOGIC; -- Enable State Update
+        is_decrypt        : in STD_LOGIC; -- 0=Encrypt, 1=Decrypt
+        en_xor_lsb        : in STD_LOGIC; -- Untuk Padding (jika diperlukan)
+        start_perm        : in STD_LOGIC;
+        round_mode        : in STD_LOGIC; -- 0=12 rounds, 1=8 rounds
+        mux_sel           : in STD_LOGIC_VECTOR(2 downto 0);
+        
+        -- Inputs dari Buffer
+        in_key, in_nonce  : in STD_LOGIC_VECTOR(127 downto 0);
+        in_ad, in_tag     : in STD_LOGIC_VECTOR(127 downto 0);
+        
+        -- >>> PERBAIKAN: Input Data sekarang 128-bit <<<
+        in_data           : in STD_LOGIC_VECTOR(127 downto 0); 
+        
+        -- Output Control
+        perm_done         : out STD_LOGIC;
+        tag_valid         : out STD_LOGIC;
+        
+        -- Output Data
+        out_data          : out STD_LOGIC_VECTOR(127 downto 0);
+        out_tag           : out STD_LOGIC_VECTOR(127 downto 0)
     );
 end ascon_datapath;
 
 architecture Behavioral of ascon_datapath is
     signal S, perm_out_wire : std_logic_vector(319 downto 0);
-    signal current_data_chunk, xor_result : std_logic_vector(127 downto 0);
+    signal xor_result : std_logic_vector(127 downto 0);
+    
+    -- Sinyal perhitungan Tag (Internal)
+    signal calc_tag : std_logic_vector(127 downto 0);
 begin
-    -- Permutation
+    
+    -- 1. Instansiasi Permutasi
     inst_perm : entity work.ascon_permutation port map (
-        clk => clk,
-		  rst_n => rst_n,
-		  start => start_perm,
-		  round_mode => round_mode,
-        state_in => S,
-		  state_out => perm_out_wire,
-		  done => perm_done
+        clk        => clk,
+        rst_n      => rst_n,
+        start      => start_perm,
+        round_mode => round_mode,
+        state_in   => S,
+        state_out  => perm_out_wire,
+        done       => perm_done
     );
 
-    -- Data Mux (Chunk 1 vs Chunk 2)
-    current_data_chunk <= in_data(255 downto 128) when data_select = '0' else in_data(127 downto 0);
-
-    -- State Update Process
+    -- 2. State Update Process
     process(clk, rst_n)
     begin
-        if rst_n = '0' then S <= (others => '0');
+        if rst_n = '0' then 
+            S <= (others => '0');
         elsif rising_edge(clk) then
             if en_SI = '1' then
                 case mux_sel is
-                    when "000" => -- Init
+                    -- [000] INITIALIZATION: Load IV | Key | Nonce
+                    -- x0=IV, x1=Key_Hi, x2=Key_Lo, x3=Nonce_Hi, x4=Nonce_Lo
+                    when "000" => 
                         S <= ASCON_IV & in_key & in_nonce;
-                    when "001" => -- Hasil permutasi
-                        S <= perm_out_wire;
-                    when "010" => -- XOR AD (Rate 128-bit: x0, x1)
-                        S(319 downto 192) <= S(319 downto 192) XOR in_ad;
-                    when "011" => -- Process Data (Rate 128-bit: x0, x1)
-                        if is_decrypt = '0' then
-                            S(319 downto 192) <= S(319 downto 192) XOR current_data_chunk;
-                        else
-                            S(319 downto 192) <= current_data_chunk;
-                        end if;
-                    when "101" => 
-                        S(191 downto 64) <= S(191 downto 64) XOR in_key; 
 
+                    -- [001] UPDATE FROM PERMUTATION
+                    when "001" => 
+                        S <= perm_out_wire;
+
+                    -- [010] ABSORB ASSOCIATED DATA (AD)
+                    -- XOR AD ke Rate (x0, x1) -> 128 bit pertama
+                    when "010" => 
+                        S(319 downto 192) <= S(319 downto 192) XOR in_ad;
+
+                    -- [011] PROCESS DATA (Encrypt/Decrypt)
+                    when "011" => 
+                        if is_decrypt = '0' then
+                            -- Encrypt: State di-update dengan Plaintext (P)
+                            -- P = in_data. 
+                            -- S_new = S_old XOR P.
+                            S(319 downto 192) <= S(319 downto 192) XOR in_data;
+                        else
+                            -- Decrypt: State di-update dengan Ciphertext (C)
+                            -- C = in_data.
+                            -- S_new = C. (Untuk Ascon, state menyerap Ciphertext untuk next round)
+                            S(319 downto 192) <= in_data;
+                        end if;
+
+                    -- [100] FINALIZATION: XOR KEY INTO INTERNAL STATE
+                    -- Ascon Spec: x1 <= x1 XOR K_hi; x2 <= x2 XOR K_lo;
+                    -- Posisi bit: x1 (255 downto 192), x2 (191 downto 128) -> Total (255 downto 128)
                     when "100" => 
-                        S(127 downto 0) <= S(127 downto 0) XOR in_key; 
+                        S(255 downto 128) <= S(255 downto 128) XOR in_key; 
                         
                     when others => null;
                 end case;
+                
+            -- Padding Logic (Optional, biasanya 0x80 XOR ke LSB byte terakhir Rate)
             elsif en_xor_lsb = '1' then
-                S(0) <= S(0) XOR '1';
+                 -- Ascon Padding standar: XOR 0x80 di awal sisa buffer?
+                 -- Atau XOR '1' di bit terakhir domain separation? 
+                 -- Asumsi: XOR '1' ke LSB Word x4 (sesuai kode lama Anda)
+                 S(0) <= S(0) XOR '1'; 
             end if;
         end if;
     end process;
 
-    -- Output Logic
-    xor_result <= S(319 downto 192) XOR current_data_chunk;
+    -- 3. Output Logic
+    
+    -- DATA OUTPUT (Ciphertext / Plaintext)
+    -- Encrypt: C = S_old XOR P (dimana S_old XOR in_data sudah dihitung di 'xor_result')
+    -- Decrypt: P = S_old XOR C (dimana in_data adalah C)
+    xor_result <= S(319 downto 192) XOR in_data;
     out_data   <= xor_result;
-    out_tag    <= S(127 downto 0);
-    tag_valid  <= '1' when (S(127 downto 0) = in_tag) else '0';
-end Behavioral;
 
+    -- TAG OUTPUT
+    -- Rumus Tag Ascon: Tag = S_word3_4 XOR Key
+    -- S_word3_4 ada di bits (127 downto 0)
+    calc_tag <= S(127 downto 0) XOR in_key; -- WAJIB XOR KEY
+    out_tag  <= calc_tag;
+
+    -- TAG VALIDATION CHECK
+    -- Membandingkan Tag yang dihitung (calc_tag) dengan Tag yang diterima (in_tag)
+    tag_valid <= '1' when (calc_tag = in_tag) else '0';
+
+end Behavioral;
