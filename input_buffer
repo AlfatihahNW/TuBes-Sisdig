@@ -7,15 +7,20 @@ entity input_buffer is
         clk, rst_n, rx_valid : in STD_LOGIC;
         rx_data : in STD_LOGIC_VECTOR (7 downto 0);
 
-        reg_key, reg_nonce, reg_ad, reg_tag_in : out STD_LOGIC_VECTOR (127 downto 0);
-        reg_data : out STD_LOGIC_VECTOR (255 downto 0); --XXXX MUNGKIN UBAH 128 FIX
+        -- Semua output sekarang seragam 128-bit (16 Byte)
+        reg_key      : out STD_LOGIC_VECTOR (127 downto 0);
+        reg_nonce    : out STD_LOGIC_VECTOR (127 downto 0);
+        reg_ad       : out STD_LOGIC_VECTOR (127 downto 0);
+        reg_data     : out STD_LOGIC_VECTOR (127 downto 0); -- SUDAH DIPERBAIKI (Clean)
+        reg_tag_in   : out STD_LOGIC_VECTOR (127 downto 0);
         
-        buffer_full, o_is_short_msg : out STD_LOGIC --XXXXX o_is_short_msg MUNGKIN NGGAK PERLU
+        buffer_full  : out STD_LOGIC
+        -- o_is_short_msg DIHAPUS (Tidak perlu karena panjang data fix)
     );
 end input_buffer;
 
 architecture Behavioral of input_buffer is
-    -- Kapasitas buffer 128 byte
+    -- Kapasitas buffer cukup 80 byte sebenarnya, tapi 128 aman untuk cadangan
     type mem_type is array (0 to 127) of std_logic_vector(7 downto 0);
     signal r_mem : mem_type := (others => (others => '0'));
     
@@ -27,18 +32,28 @@ begin
     process(clk, rst_n)
     begin
         if rst_n = '0' then
-            r_byte_cnt <= 0; r_timer <= 0; r_data_done <= '0';
+            r_byte_cnt <= 0; 
+            r_timer <= 0; 
+            r_data_done <= '0';
             r_mem <= (others => (others => '0'));
         elsif rising_edge(clk) then
             if rx_valid = '1' then
-                if r_byte_cnt < 96 then 
+                -- Batas penerimaan dimaksimalkan ke 80 byte (sesuai protokol)
+                -- 16 Key + 16 Nonce + 16 AD + 16 Data + 16 Tag = 80 Byte
+                if r_byte_cnt < 80 then 
                     r_mem(r_byte_cnt) <= rx_data; 
                     r_byte_cnt <= r_byte_cnt + 1; 
                 end if;
-                r_timer <= 0; r_data_done <= '0';
+                r_timer <= 0; 
+                r_data_done <= '0';
             else
+                -- Timeout Logic
                 if r_byte_cnt > 0 and r_data_done = '0' then
-                    if r_timer < 100000 then r_timer <= r_timer + 1; else r_data_done <= '1'; end if;
+                    if r_timer < 100000 then 
+                        r_timer <= r_timer + 1; 
+                    else 
+                        r_data_done <= '1'; 
+                    end if;
                 end if;
             end if;
         end if;
@@ -46,36 +61,38 @@ begin
 
     buffer_full <= r_data_done;
 
-    -- LOGIC SHORT MSG (PENTING):
-    -- Batas 80 byte (Key+Nonce+AD_16+Data_16+Tag_16)
-    o_is_short_msg <= '1' when r_byte_cnt <= 80 else '0'; --MUNGKIN NGGAK PERLU
+    -- === MAPPING DATA (Manual Concatenation untuk memastikan urutan Byte) ===
+    -- Menggunakan manual concat (ampersand &) lebih aman daripada slicing array
+    -- untuk menghindari kebingungan Endianness (Big Endian vs Little Endian).
 
-    -- === MAPPING DATA ===
+    -- 1. KEY (Byte 0-15)
+    reg_key <= r_mem(0)  & r_mem(1)  & r_mem(2)  & r_mem(3)  & 
+               r_mem(4)  & r_mem(5)  & r_mem(6)  & r_mem(7)  &
+               r_mem(8)  & r_mem(9)  & r_mem(10) & r_mem(11) & 
+               r_mem(12) & r_mem(13) & r_mem(14) & r_mem(15);
 
-    -- 1. KEY (0-15)
-    reg_key <= r_mem(0)&r_mem(1)&r_mem(2)&r_mem(3)&r_mem(4)&r_mem(5)&r_mem(6)&r_mem(7)&
-               r_mem(8)&r_mem(9)&r_mem(10)&r_mem(11)&r_mem(12)&r_mem(13)&r_mem(14)&r_mem(15); -- BISA r_mem(0 to 15)
+    -- 2. NONCE (Byte 16-31)
+    reg_nonce <= r_mem(16) & r_mem(17) & r_mem(18) & r_mem(19) & 
+                 r_mem(20) & r_mem(21) & r_mem(22) & r_mem(23) &
+                 r_mem(24) & r_mem(25) & r_mem(26) & r_mem(27) & 
+                 r_mem(28) & r_mem(29) & r_mem(30) & r_mem(31);
 
-    -- 2. NONCE (16-31)
-    reg_nonce <= r_mem(16)&r_mem(17)&r_mem(18)&r_mem(19)&r_mem(20)&r_mem(21)&r_mem(22)&r_mem(23)&
-                 r_mem(24)&r_mem(25)&r_mem(26)&r_mem(27)&r_mem(28)&r_mem(29)&r_mem(30)&r_mem(31); -- BISA r_mem(16 to 31)
+    -- 3. AD (Byte 32-47) 
+    reg_ad <= r_mem(32) & r_mem(33) & r_mem(34) & r_mem(35) & 
+              r_mem(36) & r_mem(37) & r_mem(38) & r_mem(39) &
+              r_mem(40) & r_mem(41) & r_mem(42) & r_mem(43) & 
+              r_mem(44) & r_mem(45) & r_mem(46) & r_mem(47);
 
-    -- 3. AD (32-47) 
-    reg_ad <= r_mem(32)&r_mem(33)&r_mem(34)&r_mem(35)&r_mem(36)&r_mem(37)&r_mem(38)&r_mem(39)&
-              r_mem(40)&r_mem(41)&r_mem(42)&r_mem(43)&r_mem(44)&r_mem(45)&r_mem(46)&r_mem(47); -- BISA r_mem(32 to 47)
+    -- 4. DATA (Byte 48-63) -> SUDAH DIRAPIKAN JADI 128 BIT
+    reg_data <= r_mem(48) & r_mem(49) & r_mem(50) & r_mem(51) & 
+                r_mem(52) & r_mem(53) & r_mem(54) & r_mem(55) &
+                r_mem(56) & r_mem(57) & r_mem(58) & r_mem(59) & 
+                r_mem(60) & r_mem(61) & r_mem(62) & r_mem(63);
 
-    -- 4. DATA (48-63)
-    -- Blok 1 (Atas): Diisi Data Valid (16 Byte)
-    reg_data(255 downto 128) <= r_mem(48)&r_mem(49)&r_mem(50)&r_mem(51)&r_mem(52)&r_mem(53)&r_mem(54)&r_mem(55)&
-                                r_mem(56)&r_mem(57)&r_mem(58)&r_mem(59)&r_mem(60)&r_mem(61)&r_mem(62)&r_mem(63); -- BISA r_mem(48 to 63),  MUNGKIN CUKUP INI SAJA
-    --reg_data <= r_mem(48 to 63);
-    -- Blok 2 (Bawah): DIMATIKAN dengan NOL. 
-    -- Ini menjamin sistem hanya memproses 16 byte, meski bus-nya 256 bit.
-    reg_data(127 downto 0) <= (others => '0'); -- BAGIAN INI BISA DIHAPUS
-
-    -- 5. TAG (64-79)
-    -- Selalu mengambil byte ini, baik itu Tag Dummy (Enc) atau Tag Asli (Dec)
-    reg_tag_in <= r_mem(64)&r_mem(65)&r_mem(66)&r_mem(67)&r_mem(68)&r_mem(69)&r_mem(70)&r_mem(71)&
-                  r_mem(72)&r_mem(73)&r_mem(74)&r_mem(75)&r_mem(76)&r_mem(77)&r_mem(78)&r_mem(79); --r_mem(64 to 79)
+    -- 5. TAG (Byte 64-79)
+    reg_tag_in <= r_mem(64) & r_mem(65) & r_mem(66) & r_mem(67) & 
+                  r_mem(68) & r_mem(69) & r_mem(70) & r_mem(71) &
+                  r_mem(72) & r_mem(73) & r_mem(74) & r_mem(75) & 
+                  r_mem(76) & r_mem(77) & r_mem(78) & r_mem(79);
 
 end Behavioral;
