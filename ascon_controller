@@ -8,13 +8,12 @@ entity ascon_controller is
         btn_encrypt      : in STD_LOGIC;
         btn_decrypt      : in STD_LOGIC;
         perm_done        : in STD_LOGIC;
-        tag_valid        : in STD_LOGIC;
-        -- is_short_msg DIHAPUS (Tidak dipakai lagi)
+        tag_valid        : in STD_LOGIC; -- Input hasil perbandingan Tag (dari Datapath)
         
+        -- Output Control Signals
         en_SI            : out STD_LOGIC;
         is_decrypt       : out STD_LOGIC;
         en_xor_lsb       : out STD_LOGIC;
-        -- data_select DIHAPUS (Tidak dipakai lagi)
         start_perm       : out STD_LOGIC;
         round_mode       : out STD_LOGIC;
         led_busy         : out STD_LOGIC;
@@ -25,29 +24,15 @@ entity ascon_controller is
 end ascon_controller;
 
 architecture Behavioral of ascon_controller is
-    -- Daftar State yang sudah DISEDERHANAKAN
     type state_type is (
         ST_IDLE, ST_RX_WAIT, ST_BTN_WAIT, 
+        ST_INIT_LOAD, ST_INIT_PERM_TRIG, ST_INIT_PERM_WAIT, ST_INIT_XOR_KEY,
         
-        -- Initialization Phase
-        ST_INIT_LOAD,      
-        ST_INIT_PERM_TRIG, ST_INIT_PERM_WAIT, 
+        -- State AD (Associated Data) diaktifkan
+        ST_AD_XOR, ST_AD_PERM_TRIG, ST_AD_PERM_WAIT, ST_DOM_SEP,
         
-        -- Associated Data Phase
-        ST_AD_XOR,         
-        ST_AD_PERM_TRIG,   ST_AD_PERM_WAIT, 
-        
-        -- Domain Separation
-        ST_DOM_SEP,
-        
-        -- Data Processing Phase (Single Block 128-bit)
-        ST_DATA_XOR,       
-        
-        -- Finalization Phase
-        ST_FINAL_XOR_KEY,  
-        ST_FINAL_PERM_TRIG, ST_FINAL_PERM_WAIT, 
-        
-        -- Verification & Finish
+        ST_DATA_XOR, 
+        ST_FINAL_XOR_KEY, ST_FINAL_PERM_TRIG, ST_FINAL_PERM_WAIT, 
         ST_CHECK_TAG, ST_DONE, ST_ERROR
     );
     
@@ -62,21 +47,14 @@ begin
         if rst_n = '0' then
             state <= ST_IDLE; 
             r_is_decrypt <= '0';
-            en_SI <= '0'; 
-            mux_sel <= "000"; 
-            en_xor_lsb <= '0'; 
-            start_perm <= '0'; 
-            round_mode <= '0'; 
-            led_busy <= '0'; 
-            led_done <= '0'; 
+            en_SI <= '0'; mux_sel <= "000"; en_xor_lsb <= '0'; 
+            start_perm <= '0'; round_mode <= '0'; 
+            led_busy <= '0'; led_done <= '0';
         elsif rising_edge(clk) then
-            -- Default Pulse Values (Agar tidak perlu ditulis di setiap state)
-            en_SI <= '0'; 
-            start_perm <= '0'; 
-            en_xor_lsb <= '0'; 
+            -- Default Pulse Values
+            en_SI <= '0'; start_perm <= '0'; en_xor_lsb <= '0'; 
 
             case state is
-                -- === 1. IDLE & WAITING INPUT ===
                 when ST_IDLE => 
                     state <= ST_RX_WAIT; 
                     led_done <= '0';
@@ -86,107 +64,88 @@ begin
                     
                 when ST_BTN_WAIT =>
                     if btn_encrypt = '1' then 
-                        r_is_decrypt <= '0'; 
-                        state <= ST_INIT_LOAD; 
-                        led_busy <= '1';
+                        r_is_decrypt <= '0'; state <= ST_INIT_LOAD; led_busy <= '1';
                     elsif btn_decrypt = '1' then 
-                        r_is_decrypt <= '1'; 
-                        state <= ST_INIT_LOAD; 
-                        led_busy <= '1'; 
+                        r_is_decrypt <= '1'; state <= ST_INIT_LOAD; led_busy <= '1'; 
                     end if;
 
-                -- === 2. INITIALIZATION ===
+                -- === 1. INITIALIZATION ===
                 when ST_INIT_LOAD => 
-                    mux_sel <= "000"; -- Load IV, Key, Nonce
-                    en_SI <= '1'; 
-                    state <= ST_INIT_PERM_TRIG;
+                    mux_sel <= "000"; en_SI <= '1'; state <= ST_INIT_PERM_TRIG;
                 
-                -- Permutasi a (12 Ronde)
                 when ST_INIT_PERM_TRIG => 
-                    round_mode <= '0'; -- Mode 12 Ronde
-                    start_perm <= '1'; 
-                    state <= ST_INIT_PERM_WAIT;
+                    round_mode <= '0'; start_perm <= '1'; state <= ST_INIT_PERM_WAIT;
                     
                 when ST_INIT_PERM_WAIT => 
                     round_mode <= '0';
                     if perm_done = '1' then 
-                        mux_sel <= "001"; -- Update State dari Permutasi
-                        en_SI <= '1'; 
-                        -- HAPUS ST_INIT_XOR_KEY (Tidak perlu XOR Key di awal Ascon-128a)
-                        -- Ascon-128a langsung lanjut ke AD XOR setelah Init Permutation.
-                        state <= ST_AD_XOR; 
+                        mux_sel <= "001"; en_SI <= '1'; state <= ST_INIT_XOR_KEY; 
                     end if;
+
+                when ST_INIT_XOR_KEY =>
+                    mux_sel <= "101"; en_SI <= '1'; 
+                    -- REVISI: Lanjut ke proses AD karena ada input AD 16 Byte
+                    state <= ST_AD_XOR; 
                 
-                -- === 3. ASSOCIATED DATA ===
+                -- === 2. ASSOCIATED DATA (AD) ===
                 when ST_AD_XOR => 
                     mux_sel <= "010"; -- XOR AD
                     en_SI <= '1'; 
                     state <= ST_AD_PERM_TRIG;
                 
-                -- Permutasi b (8 Ronde)
                 when ST_AD_PERM_TRIG => 
-                    round_mode <= '1'; -- Mode 8 Ronde
-                    start_perm <= '1'; 
-                    state <= ST_AD_PERM_WAIT;
+                    round_mode <= '1'; -- 8 Ronde (Ascon-128a)
+                    start_perm <= '1'; state <= ST_AD_PERM_WAIT;
                     
                 when ST_AD_PERM_WAIT => 
                     round_mode <= '1';
                     if perm_done = '1' then 
-                        mux_sel <= "001"; 
-                        en_SI <= '1'; 
-                        state <= ST_DOM_SEP; 
+                        mux_sel <= "001"; en_SI <= '1'; state <= ST_DOM_SEP; 
                     end if;
                 
-                -- === 4. DOMAIN SEPARATION ===
+                -- === 3. DOMAIN SEPARATION ===
                 when ST_DOM_SEP => 
-                    en_xor_lsb <= '1'; -- XOR 0x01 ke LSB
-                    state <= ST_DATA_XOR;
+                    en_xor_lsb <= '1'; state <= ST_DATA_XOR;
 
-                -- === 5. DATA PROCESSING (Single Block) ===
+                -- === 4. DATA PROCESSING ===
                 when ST_DATA_XOR => 
-                    mux_sel <= "011"; -- XOR Data (Plain/Cipher)
-                    en_SI <= '1';
-                    -- Karena data fix 1 blok, setelah XOR langsung Finalisasi.
-                    -- Tidak ada Permutasi intermediate.
+                    mux_sel <= "011"; en_SI <= '1'; 
                     state <= ST_FINAL_XOR_KEY; 
 
-                -- === 6. FINALIZATION ===
+                -- === 5. FINALIZATION ===
                 when ST_FINAL_XOR_KEY => 
-                    mux_sel <= "100"; -- XOR Key ke Word 1 & 2 (Sinkron dgn Datapath baru)
-                    en_SI <= '1'; 
-                    state <= ST_FINAL_PERM_TRIG;
+                    mux_sel <= "100"; en_SI <= '1'; state <= ST_FINAL_PERM_TRIG;
                 
-                -- Permutasi a (12 Ronde)
                 when ST_FINAL_PERM_TRIG => 
-                    round_mode <= '0'; -- Mode 12 Ronde
-                    start_perm <= '1'; 
-                    state <= ST_FINAL_PERM_WAIT;
+                    round_mode <= '0'; start_perm <= '1'; state <= ST_FINAL_PERM_WAIT;
                     
                 when ST_FINAL_PERM_WAIT => 
                     round_mode <= '0';
                     if perm_done = '1' then 
-                        mux_sel <= "001"; 
-                        en_SI <= '1'; 
-                        state <= ST_CHECK_TAG; -- Langsung cek tag, XOR Key akhir dihandle Datapath output
+                        mux_sel <= "001"; en_SI <= '1'; state <= ST_CHECK_TAG; 
                     end if;
                 
-                -- === 7. VERIFICATION ===
+                -- === 6. VERIFICATION & DECISION ===
                 when ST_CHECK_TAG =>
-                    -- Jika DECRYPT dan Tag Invalid -> Error
-                    if r_is_decrypt = '1' and tag_valid = '0' then 
-                        state <= ST_ERROR; 
-                    else 
-                        state <= ST_DONE; 
+                    if r_is_decrypt = '0' then
+                        -- Mode ENCRYPT: Tidak perlu cek tag, langsung selesai
+                        state <= ST_DONE;
+                    else
+                        -- Mode DECRYPT: Cek apakah Tag yang dihitung == Tag Input?
+                        if tag_valid = '1' then
+                            state <= ST_DONE;  -- Sukses
+                        else
+                            state <= ST_ERROR; -- Gagal
+                        end if;
                     end if;
 
                 when ST_DONE => 
-                    led_busy <= '0'; 
-                    led_done <= '1';
-                    -- Bisa tambah logic "Wait Reset" disini jika mau
+                    led_busy <= '0'; led_done <= '1';
+                    -- Diam sampai reset
                     
                 when ST_ERROR => 
                     led_busy <= '0';
-                    -- Error state, diam sampai reset
+                    -- Diam di state error (Top level akan baca status_error)
                     
                 when others => state <= ST_IDLE;
             end case;
