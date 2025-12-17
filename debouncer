@@ -1,3 +1,5 @@
+
+
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 use IEEE.NUMERIC_STD.ALL;
@@ -31,7 +33,7 @@ begin
             btn_sync_1 <= '0';
             btn_stable <= '0';
         elsif rising_edge(clk) then
-            -- 1. Input Synchronizer (mencegah metastability)
+            -- 1. Input Synchronizer
             btn_sync_0 <= btn_in;
             btn_sync_1 <= btn_sync_0;
 
@@ -56,6 +58,7 @@ begin
     end process;
 
 end Behavioral;
+
 
 
 
