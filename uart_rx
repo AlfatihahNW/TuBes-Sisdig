@@ -4,11 +4,11 @@ use IEEE.NUMERIC_STD.ALL;
 
 entity uart_rx is
     Generic (
-        CLKS_PER_BIT : integer := 5208 
+        CLKS_PER_BIT : integer := 5208 -- Sesuaikan dengan (Clock_FPGA / Baudrate)
     );
     Port (
         i_Clk       : in  STD_LOGIC;
-        i_Rst_n     : in  STD_LOGIC; -- TAMBAHAN: Reset Active Low
+        i_Rst_n     : in  STD_LOGIC;
         i_RX_Serial : in  STD_LOGIC;
         o_RX_DV     : out STD_LOGIC;
         o_RX_Byte   : out STD_LOGIC_VECTOR (7 downto 0)
@@ -21,7 +21,7 @@ architecture RTL of uart_rx is
                        s_RX_Stop_Bit, s_Cleanup);
     signal r_SM_Main : t_SM_Main := s_Idle;
 
-    -- Input Synchronizer Signals (PENTING UNTUK FPGA)
+    -- Synchronizers (Untuk mencegah Metastability)
     signal r_RX_Data_R : std_logic := '1';
     signal r_RX_Data   : std_logic := '1';
 
@@ -32,17 +32,16 @@ architecture RTL of uart_rx is
     
 begin
 
-    -- 1. Input Synchronizer Process (Double Flopping)
-    -- Ini mencegah glitch/metastability dari sinyal luar
+    -- 1. Input Synchronizer (Double Flop)
     p_Sync : process (i_Clk)
     begin
         if rising_edge(i_Clk) then
             r_RX_Data_R <= i_RX_Serial;
-            r_RX_Data   <= r_RX_Data_R; -- Gunakan sinyal ini di FSM
+            r_RX_Data   <= r_RX_Data_R;
         end if;
     end process p_Sync;
 
-    -- 2. Main FSM Process
+    -- 2. State Machine
     p_UART_RX : process (i_Clk, i_Rst_n)
     begin
         if i_Rst_n = '0' then
@@ -52,38 +51,46 @@ begin
             r_Clk_Count <= 0;
             r_Bit_Index <= 0;
         elsif rising_edge(i_Clk) then
+            
+            -- Default assignment untuk DV (Pulse hanya 1 cycle saat valid)
+            -- r_RX_DV <= '0'; -- (Opsional: logic ini dipindah ke s_Cleanup)
+
             case r_SM_Main is
+                
+                -- IDLE: Cari Falling Edge (Logika 1 ke 0)
                 when s_Idle =>
-                    r_RX_DV       <= '0';
-                    r_Clk_Count   <= 0;
-                    r_Bit_Index   <= 0;
+                    r_Clk_Count <= 0;
+                    r_Bit_Index <= 0;
+                    r_RX_DV     <= '0'; -- Pastikan DV mati saat idle
                     
-                    if r_RX_Data = '0' then       -- Gunakan r_RX_Data (Sync)
+                    if r_RX_Data = '0' then       -- Start bit detected
                         r_SM_Main <= s_RX_Start_Bit;
                     else
                         r_SM_Main <= s_Idle;
                     end if;
 
+                -- START BIT: Validasi di Tengah (50%)
                 when s_RX_Start_Bit =>
                     if r_Clk_Count = (CLKS_PER_BIT-1)/2 then
-                        if r_RX_Data = '0' then   -- Gunakan r_RX_Data (Sync)
-                            r_Clk_Count <= 0;
+                        if r_RX_Data = '0' then
+                            r_Clk_Count <= 0; 
                             r_SM_Main   <= s_RX_Data_Bits;
                         else
-                            r_SM_Main   <= s_Idle;
+                            r_SM_Main   <= s_Idle; -- False alarm (Glitch)
                         end if;
                     else
                         r_Clk_Count <= r_Clk_Count + 1;
                         r_SM_Main   <= s_RX_Start_Bit;
                     end if;
 
+                -- DATA BITS: Ambil 8 bit
                 when s_RX_Data_Bits =>
                     if r_Clk_Count < CLKS_PER_BIT-1 then
                         r_Clk_Count <= r_Clk_Count + 1;
                         r_SM_Main   <= s_RX_Data_Bits;
                     else
                         r_Clk_Count            <= 0;
-                        r_RX_Byte(r_Bit_Index) <= r_RX_Data; -- Gunakan r_RX_Data
+                        r_RX_Byte(r_Bit_Index) <= r_RX_Data;
                         
                         if r_Bit_Index < 7 then
                             r_Bit_Index <= r_Bit_Index + 1;
@@ -94,22 +101,33 @@ begin
                         end if;
                     end if;
 
+                -- STOP BIT: PERBAIKAN DISINI
+                -- Tunggu durasi penuh agar sinkronisasi aman.
                 when s_RX_Stop_Bit =>
                     if r_Clk_Count < CLKS_PER_BIT-1 then
                         r_Clk_Count <= r_Clk_Count + 1;
                         r_SM_Main   <= s_RX_Stop_Bit;
                     else
-                        r_RX_DV     <= '1';
+                        -- Cek Framing Error: Stop bit HARUS '1'
+                        if r_RX_Data = '1' then
+                            r_RX_DV <= '1'; -- DATA VALID!
+                        else
+                            r_RX_DV <= '0'; -- Error Framing
+                        end if;
+                        
                         r_Clk_Count <= 0;
-                        r_SM_Main   <= s_Cleanup;
+                        r_SM_Main   <= s_Cleanup; -- Pindah ke Cleanup
                     end if;
 
+                -- CLEANUP: WAJIB ADA
+                -- Memberi jeda 1 clock cycle agar r_RX_DV terbaca '1' oleh modul lain
                 when s_Cleanup =>
                     r_SM_Main <= s_Idle;
-                    r_RX_DV   <= '0';
+                    r_RX_DV   <= '0'; -- Matikan flag valid
                     
                 when others =>
                     r_SM_Main <= s_Idle;
+
             end case;
         end if;
     end process p_UART_RX;
