@@ -4,22 +4,20 @@ use IEEE.NUMERIC_STD.ALL;
 
 entity uart_tx is
     Generic (
-        CLKS_PER_BIT : integer := 5208 -- Harus sama dengan RX (50MHz / 115200)
+        CLKS_PER_BIT : integer := 434 -- Default 115200
     );
     Port (
         i_Clk       : in  STD_LOGIC;
         i_Rst_n     : in  STD_LOGIC;
-        i_TX_DV     : in  STD_LOGIC; -- Data Valid (Pulse '1' untuk kirim)
+        i_TX_DV     : in  STD_LOGIC;
         i_TX_Byte   : in  STD_LOGIC_VECTOR (7 downto 0);
-        
-        o_TX_Active : out STD_LOGIC; -- '1' saat sedang sibuk mengirim
-        o_TX_Serial : out STD_LOGIC; -- Output ke Pin FPGA
-        o_TX_Done   : out STD_LOGIC  -- Pulse '1' saat pengiriman 1 byte selesai
+        o_TX_Active : out STD_LOGIC;
+        o_TX_Serial : out STD_LOGIC;
+        o_TX_Done   : out STD_LOGIC
     );
 end uart_tx;
 
 architecture RTL of uart_tx is
-    
     type t_SM_Main is (s_Idle, s_TX_Start_Bit, s_TX_Data_Bits, 
                        s_TX_Stop_Bit, s_Cleanup);
     signal r_SM_Main : t_SM_Main := s_Idle;
@@ -29,7 +27,7 @@ architecture RTL of uart_tx is
     signal r_TX_Data   : std_logic_vector(7 downto 0) := (others => '0');
     signal r_TX_Done   : std_logic := '0';
     signal r_TX_Active : std_logic := '0';
-    signal r_TX_Serial : std_logic := '1'; -- Default High (Idle UART)
+    signal r_TX_Serial : std_logic := '1'; -- Idle High
     
 begin
 
@@ -42,33 +40,28 @@ begin
             r_TX_Serial <= '1';
             r_Bit_Index <= 0;
             r_Clk_Count <= 0;
-				r_TX_Data   <= (others => '0');
+            r_TX_Data   <= (others => '0');
         elsif rising_edge(i_Clk) then
+            r_TX_Done <= '0'; -- Pulse default low
             
-            -- Default Values
-            r_TX_Done <= '0'; 
-
             case r_SM_Main is
-                
-                -- 1. IDLE: Tunggu perintah i_TX_DV = '1'
                 when s_Idle =>
                     r_TX_Active <= '0';
-                    r_TX_Serial <= '1'; -- Line harus High saat Idle
+                    r_TX_Serial <= '1';
                     r_Clk_Count <= 0;
                     r_Bit_Index <= 0;
                     
                     if i_TX_DV = '1' then
-                        r_TX_Data <= i_TX_Byte; -- Simpan data yang mau dikirim
+                        r_TX_Data <= i_TX_Byte;
                         r_SM_Main <= s_TX_Start_Bit;
                         r_TX_Active <= '1';
                     else
                         r_SM_Main <= s_Idle;
                     end if;
 
-                -- 2. Kirim START BIT (Low)
                 when s_TX_Start_Bit =>
                     r_TX_Active <= '1';
-                    r_TX_Serial <= '0'; -- Start Bit is Low
+                    r_TX_Serial <= '0';
                     
                     if r_Clk_Count < CLKS_PER_BIT-1 then
                         r_Clk_Count <= r_Clk_Count + 1;
@@ -78,17 +71,15 @@ begin
                         r_SM_Main   <= s_TX_Data_Bits;
                     end if;
 
-                -- 3. Kirim 8 BIT DATA (LSB First)
                 when s_TX_Data_Bits =>
                     r_TX_Active <= '1';
-                    r_TX_Serial <= r_TX_Data(r_Bit_Index); -- Kirim bit ke-i
+                    r_TX_Serial <= r_TX_Data(r_Bit_Index);
                     
                     if r_Clk_Count < CLKS_PER_BIT-1 then
                         r_Clk_Count <= r_Clk_Count + 1;
                         r_SM_Main   <= s_TX_Data_Bits;
                     else
                         r_Clk_Count <= 0;
-                        
                         if r_Bit_Index < 7 then
                             r_Bit_Index <= r_Bit_Index + 1;
                             r_SM_Main   <= s_TX_Data_Bits;
@@ -98,21 +89,19 @@ begin
                         end if;
                     end if;
 
-                -- 4. Kirim STOP BIT (High)
                 when s_TX_Stop_Bit =>
                     r_TX_Active <= '1';
-                    r_TX_Serial <= '1'; -- Stop Bit is High
+                    r_TX_Serial <= '1';
                     
                     if r_Clk_Count < CLKS_PER_BIT-1 then
                         r_Clk_Count <= r_Clk_Count + 1;
                         r_SM_Main   <= s_TX_Stop_Bit;
                     else
-                        r_TX_Done   <= '1'; -- Selesai kirim 1 byte
+                        r_TX_Done   <= '1';
                         r_Clk_Count <= 0;
                         r_SM_Main   <= s_Cleanup;
                     end if;
 
-                -- 5. Cleanup (Jeda 1 cycle)
                 when s_Cleanup =>
                     r_TX_Active <= '0';
                     r_TX_Done   <= '1';
