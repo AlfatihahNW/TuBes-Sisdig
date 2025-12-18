@@ -13,7 +13,7 @@ entity ascon_top is
         uart_rx_pin   : in  STD_LOGIC;
         uart_tx_pin   : out STD_LOGIC;
         
-        -- --- TOMBOL KONTROL ---
+        -- --- TOMBOL KONTROL (Active Low) ---
         btn_encrypt   : in  STD_LOGIC;
         btn_decrypt   : in  STD_LOGIC;
         
@@ -26,7 +26,7 @@ end ascon_top;
 
 architecture Behavioral of ascon_top is
 
-    -- [TAMBAHAN PENTING] Baud Rate 9600 (50MHz / 9600 = 5208)
+    -- BAUD RATE 9600 (50MHz / 9600 = 5208)
     constant C_CLKS_PER_BIT : integer := 5208;
 
     -- Sinyal Data (Fixed 128-bit)
@@ -62,7 +62,7 @@ architecture Behavioral of ascon_top is
     signal r_result_tag  : std_logic_vector(127 downto 0);
     
     -- UART TX Variables
-    type tx_state_type is (TX_IDLE, TX_LOAD_MSG, TX_LOAD_ERROR, TX_SENDING, TX_WAIT_BYTE, TX_DONE);
+    type tx_state_type is (TX_IDLE, TX_LOAD_MSG, TX_SENDING, TX_WAIT_BYTE, TX_DONE);
     signal tx_state       : tx_state_type := TX_IDLE;
     
     signal tx_byte_cnt    : integer range 0 to 63; 
@@ -73,19 +73,17 @@ architecture Behavioral of ascon_top is
     signal w_tx_done_tick : std_logic;
     signal w_tx_busy      : std_logic;
 
-    constant MSG_ERROR_HEX : std_logic_vector(119 downto 0) := x"54616720546964616B2056616C6964"; -- "Tag Tidak Valid"
-    
-    -- Sinyal Debounce & Inverter Tombol
+    -- Signal Debounce & Inverter Tombol
     signal w_btn_encrypt_db : std_logic;
     signal w_btn_decrypt_db : std_logic;
     
-    -- [PERBAIKAN UTAMA] Signal perantara untuk logika NOT
+    -- Signal perantara untuk logika NOT
     signal w_btn_encrypt_inv : std_logic;
     signal w_btn_decrypt_inv : std_logic;
 
 begin
 
-    -- [PERBAIKAN UTAMA] Assign logika NOT di luar Port Map
+    -- INVERTER Active Low -> Active High
     w_btn_encrypt_inv <= not btn_encrypt;
     w_btn_decrypt_inv <= not btn_decrypt;
 
@@ -96,7 +94,7 @@ begin
     inst_db_dec : entity work.debouncer
     port map ( clk => clk, rst_n => rst_n, btn_in => w_btn_decrypt_inv, btn_out => w_btn_decrypt_db );
     
-    -- 2. UART RX (PENTING: Pakai Generic Map)
+    -- 2. UART RX
     inst_uart_rx : entity work.uart_rx 
     generic map ( CLKS_PER_BIT => C_CLKS_PER_BIT )
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_RX_Serial => uart_rx_pin, o_RX_DV => w_rx_dv, o_RX_Byte => w_rx_byte );
@@ -121,7 +119,7 @@ begin
         out_data => w_out_data, out_tag => w_out_tag, tag_valid => w_tag_valid
     );
     
-    -- 5. UART TX (PENTING: Pakai Generic Map)
+    -- 5. UART TX
     inst_uart_tx : entity work.uart_tx 
     generic map ( CLKS_PER_BIT => C_CLKS_PER_BIT )
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_TX_DV => w_tx_start, i_TX_Byte => w_tx_byte, o_TX_Active => w_tx_busy, o_TX_Serial => uart_tx_pin, o_TX_Done => w_tx_done_tick );
@@ -135,19 +133,18 @@ begin
         led_busy => led_process, led_done => w_ctrl_done, status_error => w_ctrl_error 
     );
     
-    -- 7. PENYIMPAN HASIL (DATA + TAG)
+    -- 7. PENYIMPAN HASIL
     process(clk, rst_n)
     begin
         if rst_n = '0' then
             r_result_data <= (others => '0');
             r_result_tag  <= (others => '0');
         elsif rising_edge(clk) then
-            -- Simpan Data (Ciphertext / Plaintext)
+            -- Simpan Data
             if w_en_si = '1' and w_mux_sel = "011" then
                 r_result_data <= w_out_data;
             end if;
-            
-            -- Simpan Tag (Selalu simpan untuk dikirim balik jika diminta)
+            -- Simpan Tag (Backup)
             if w_ctrl_done = '1' then 
                 r_result_tag <= w_out_tag; 
             end if;
@@ -155,7 +152,7 @@ begin
     end process;
 
     -- =========================================================================
-    -- 8. UART SERIALIZER (REVISI LOGIKA PENGIRIMAN: DECRYPT = TAG ONLY)
+    -- 8. UART SERIALIZER (FINAL: DECRYPT = OUTPUT TAG ONLY)
     -- =========================================================================
     process(clk, rst_n)
     begin
@@ -175,42 +172,34 @@ begin
                     tx_byte_cnt <= 0;
                     led_ready   <= '0';
                     
-                    -- KASUS 1: PROSES SELESAI (Encrypt atau Decrypt)
-                    if w_ctrl_done = '1' then
+                    -- LOGIKA UTAMA:
+                    -- Trigger jika SELESAI (Done) ATAU ERROR.
+                    -- Kita pakai "OR" supaya jika Controller bilang Error (Tag tidak valid),
+                    -- kita TETAP mengirim Tag hasil hitungan itu ke UART (sesuai request).
+                    
+                    if w_ctrl_done = '1' or w_ctrl_error = '1' then
                         
                         if w_is_decrypt = '0' then
                             -- === MODE ENCRYPT ===
                             -- Kirim: Ciphertext (16 Byte) + Tag (16 Byte) = 32 Byte
-                            -- Slot Atas (255-128): Ciphertext
                             tx_data_buffer(255 downto 128) <= r_result_data;
-                            -- Slot Bawah (127-0): Tag
-                            tx_data_buffer(127 downto 0)   <= r_result_tag;
-                            
+                            tx_data_buffer(127 downto 0)   <= w_out_tag; -- Ambil langsung dari wire
                             tx_total_bytes <= 32;
                         else
                             -- === MODE DECRYPT ===
-                            -- REQUEST USER: Kirim "TAG SAJA" (16 Byte)
-                            -- Kita ambil Tag Hasil (r_result_tag) dan taruh di Slot Atas
-                            -- Agar langsung dikirim pertama kali.
-                            tx_data_buffer(255 downto 128) <= r_result_tag;
+                            -- REQUEST: "Outputnya tagnya aja"
+                            -- Kirim: CALCULATED TAG (16 Byte) SAJA
+                            -- Abaikan apakah valid atau tidak.
+                            -- Abaikan Plaintext.
                             
-                            -- Set panjang kirim hanya 16 Byte
+                            tx_data_buffer(255 downto 128) <= w_out_tag; -- Ambil langsung dari wire (Calculated Tag)
                             tx_total_bytes <= 16;
                         end if;
                         
                         tx_state <= TX_LOAD_MSG;
-                        
-                    -- KASUS 2: GAGAL (Hanya jika Controller masih cek error, opsional)
-                    elsif w_ctrl_error = '1' then
-                        -- Kirim Pesan Error
-                        tx_data_buffer(255 downto 136) <= MSG_ERROR_HEX; 
-                        tx_data_buffer(135 downto 0)   <= (others => '0');
-                        
-                        tx_total_bytes <= 15;
-                        tx_state       <= TX_LOAD_ERROR;
                     end if;
 
-                when TX_LOAD_MSG | TX_LOAD_ERROR =>
+                when TX_LOAD_MSG =>
                     led_ready <= '1';
                     tx_state  <= TX_SENDING;
 
@@ -232,7 +221,7 @@ begin
 
                 when TX_DONE =>
                     led_ready <= '1';
-                    -- Diam di sini sampai reset
+                    -- Diam di sini sampai Reset
                 
                 when others =>
                     tx_state <= TX_IDLE;
