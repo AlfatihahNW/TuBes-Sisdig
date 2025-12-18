@@ -6,16 +6,16 @@ use work.ascon_pkg.ALL;
 entity ascon_top is
     Port ( 
         -- --- CLOCK & RESET ---
-        clk           : in  STD_LOGIC; -- Clock 50 MHz
-        rst_n         : in  STD_LOGIC; -- Tombol Reset (Active Low)
+        clk           : in  STD_LOGIC;
+        rst_n         : in  STD_LOGIC;
         
         -- --- KOMUNIKASI SERIAL (UART) ---
-        uart_rx_pin   : in  STD_LOGIC; -- Pin RX (Terima dari PC)
-        uart_tx_pin   : out STD_LOGIC; -- Pin TX (Kirim ke PC)
+        uart_rx_pin   : in  STD_LOGIC;
+        uart_tx_pin   : out STD_LOGIC;
         
         -- --- TOMBOL KONTROL ---
-        btn_encrypt   : in  STD_LOGIC; -- Tombol Mulai Enkripsi
-        btn_decrypt   : in  STD_LOGIC; -- Tombol Mulai Dekripsi
+        btn_encrypt   : in  STD_LOGIC;
+        btn_decrypt   : in  STD_LOGIC;
         
         -- --- LAMPU INDIKATOR (LED) ---
         led_loading   : out STD_LOGIC; 
@@ -26,117 +26,133 @@ end ascon_top;
 
 architecture Behavioral of ascon_top is
 
-    -- ... (Deklarasi Signal sama seperti sebelumnya) ...
+    -- Sinyal Data
     signal w_rx_dv        : std_logic;
     signal w_rx_byte      : std_logic_vector(7 downto 0);
     signal w_key          : std_logic_vector(127 downto 0);
     signal w_nonce        : std_logic_vector(127 downto 0);
     signal w_ad           : std_logic_vector(127 downto 0);
-    signal w_data_in      : std_logic_vector(255 downto 0);
     signal w_tag_in       : std_logic_vector(127 downto 0);
-    signal w_buffer_full : std_logic;
-    signal w_is_short_msg : std_logic; 
+    signal w_data_in      : std_logic_vector(127 downto 0); 
+    signal w_buffer_full  : std_logic;
     
+    -- Sinyal Kontrol Internal
     signal w_en_si        : std_logic;
     signal w_mux_sel      : std_logic_vector(2 downto 0);
     signal w_is_decrypt   : std_logic;
     signal w_en_xor_lsb   : std_logic;
-    signal w_data_select : std_logic;
     signal w_start_perm   : std_logic;
     signal w_round_mode   : std_logic;
     signal w_perm_done    : std_logic;
     signal w_tag_valid    : std_logic;
+    
+    -- Sinyal Output dari Datapath
     signal w_out_data     : std_logic_vector(127 downto 0);
     signal w_out_tag      : std_logic_vector(127 downto 0);
+    
+    -- Status Controller
     signal w_ctrl_done    : std_logic; 
     signal w_ctrl_error   : std_logic; 
     
-    signal r_result_data : std_logic_vector(255 downto 0);
-    signal r_result_tag  : std_logic_vector(127 downto 0);
+    -- Register Hasil (Penting untuk stabilitas UART)
+    signal r_result_data  : std_logic_vector(127 downto 0);
+    signal r_result_tag   : std_logic_vector(127 downto 0);
     
+    -- UART TX Variables
     type tx_state_type is (TX_IDLE, TX_LOAD_MSG, TX_LOAD_ERROR, TX_SENDING, TX_WAIT_BYTE, TX_DONE);
     signal tx_state       : tx_state_type := TX_IDLE;
     
     signal tx_byte_cnt    : integer range 0 to 63; 
-    signal tx_data_buffer : std_logic_vector(383 downto 0); 
+    signal tx_data_buffer : std_logic_vector(255 downto 0); 
     signal tx_total_bytes : integer range 0 to 64; 
     signal w_tx_start     : std_logic;
     signal w_tx_byte      : std_logic_vector(7 downto 0);
-    signal w_tx_done_tick: std_logic;
+    signal w_tx_done_tick : std_logic;
     signal w_tx_busy      : std_logic;
 
-    constant MSG_ERROR_HEX : std_logic_vector(119 downto 0) := x"54616720546964616B2056616C6964"; 
+    constant MSG_ERROR_HEX : std_logic_vector(119 downto 0) := x"54616720546964616B2056616C6964"; -- "Tag Tidak Valid"
     
     signal w_btn_encrypt_db : std_logic;
     signal w_btn_decrypt_db : std_logic;
 
 begin
-    -- ... (Instansiasi Debouncer, UART RX, Buffer, Datapath, Controller SAMA) ...
-    
+
+    -- 1. INPUT DEBOUNCERS
     inst_db_enc : entity work.debouncer
     port map ( clk => clk, rst_n => rst_n, btn_in => not btn_encrypt, btn_out => w_btn_encrypt_db );
 
     inst_db_dec : entity work.debouncer
     port map ( clk => clk, rst_n => rst_n, btn_in => not btn_decrypt, btn_out => w_btn_decrypt_db );
     
+    -- 2. UART RX
     inst_uart_rx : entity work.uart_rx 
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_RX_Serial => uart_rx_pin, o_RX_DV => w_rx_dv, o_RX_Byte => w_rx_byte );
     
+    -- 3. INPUT BUFFER
     inst_buffer : entity work.input_buffer 
     port map (
         clk => clk, rst_n => rst_n, rx_data => w_rx_byte, rx_valid => w_rx_dv,
-        reg_key => w_key, reg_nonce => w_nonce, reg_ad => w_ad, reg_data => w_data_in, reg_tag_in => w_tag_in, buffer_full => w_buffer_full,
-        o_is_short_msg => w_is_short_msg 
+        reg_key => w_key, reg_nonce => w_nonce, reg_ad => w_ad, 
+        reg_data => w_data_in, 
+        reg_tag_in => w_tag_in, buffer_full => w_buffer_full
     );
     
     led_loading <= not w_buffer_full; 
     
+    -- 4. DATAPATH
     inst_datapath : entity work.ascon_datapath 
     port map (
         clk => clk, rst_n => rst_n, en_SI => w_en_si, mux_sel => w_mux_sel, is_decrypt => w_is_decrypt, en_xor_lsb => w_en_xor_lsb,
         start_perm => w_start_perm, round_mode => w_round_mode, perm_done => w_perm_done, in_key => w_key, in_nonce => w_nonce,
-        in_ad => w_ad, in_data => w_data_in, in_tag => w_tag_in, data_select => w_data_select, out_data => w_out_data, out_tag => w_out_tag, tag_valid => w_tag_valid
+        in_ad => w_ad, in_data => w_data_in, in_tag => w_tag_in, 
+        out_data => w_out_data, out_tag => w_out_tag, tag_valid => w_tag_valid
     );
     
+    -- 5. UART TX
     inst_uart_tx : entity work.uart_tx 
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_TX_DV => w_tx_start, i_TX_Byte => w_tx_byte, o_TX_Active => w_tx_busy, o_TX_Serial => uart_tx_pin, o_TX_Done => w_tx_done_tick );
 
+    -- 6. CONTROLLER (Menggunakan perbaikan ST_WAIT_S)
     inst_controller : entity work.ascon_controller
     port map (
         clk => clk, rst_n => rst_n, buffer_full => w_buffer_full, btn_encrypt => w_btn_encrypt_db, btn_decrypt => w_btn_decrypt_db, 
         perm_done => w_perm_done, tag_valid => w_tag_valid, en_SI => w_en_si, mux_sel => w_mux_sel, is_decrypt => w_is_decrypt,
-        en_xor_lsb => w_en_xor_lsb, data_select => w_data_select, start_perm => w_start_perm, round_mode => w_round_mode,
-        led_busy => led_process, led_done => w_ctrl_done, status_error => w_ctrl_error, is_short_msg => w_is_short_msg 
+        en_xor_lsb => w_en_xor_lsb, start_perm => w_start_perm, round_mode => w_round_mode,
+        led_busy => led_process, led_done => w_ctrl_done, status_error => w_ctrl_error 
     );
     
-    -- PENYIMPAN HASIL (DENGAN RESET)
+    -- 7. PENYIMPAN HASIL (DATA + TAG)
+    -- Perbaikan: Sinkronisasi penangkapan hasil dengan state controller
     process(clk, rst_n)
     begin
         if rst_n = '0' then
             r_result_data <= (others => '0');
             r_result_tag  <= (others => '0');
         elsif rising_edge(clk) then
-            if w_en_si = '1' and w_mux_sel = "011" and w_data_select = '0' then
-                r_result_data(255 downto 128) <= w_out_data;
+            -- Simpan Data (Ciphertext / Plaintext) saat state pengerjaan data aktif
+            if w_en_si = '1' and w_mux_sel = "011" then
+                r_result_data <= w_out_data;
             end if;
-            if w_en_si = '1' and w_mux_sel = "011" and w_data_select = '1' then
-                r_result_data(127 downto 0) <= w_out_data;
-            end if;
-            if w_ctrl_done = '1' then 
+            
+            -- Simpan Tag saat controller selesai melakukan verifikasi/finalisasi
+            -- Kita gunakan w_ctrl_done sebagai trigger stabil
+            if w_ctrl_done = '1' or w_ctrl_error = '1' then 
                 r_result_tag <= w_out_tag; 
             end if;
         end if;
     end process;
 
-    -- TX SERIALIZER (PERBAIKAN UTAMA DI SINI)
+    -- =========================================================================
+    -- 8. UART SERIALIZER
+    -- =========================================================================
     process(clk, rst_n)
     begin
         if rst_n = '0' then
-            tx_state       <= TX_IDLE;
-            tx_byte_cnt    <= 0;
-            w_tx_start     <= '0';
-            tx_data_buffer <= (others => '0');
-            led_ready      <= '0';
+            tx_state        <= TX_IDLE;
+            tx_byte_cnt     <= 0;
+            w_tx_start      <= '0';
+            tx_data_buffer  <= (others => '0');
+            led_ready       <= '0';
             
         elsif rising_edge(clk) then
             w_tx_start <= '0';
@@ -147,38 +163,44 @@ begin
                     tx_byte_cnt <= 0;
                     led_ready   <= '0';
                     
+                    -- Pemicu: Controller selesai tanpa error
                     if w_ctrl_done = '1' then
-                        -- >>> PERBAIKAN: FORCE 32 BYTE OUTPUT (Fixed 128-bit Mode) <<<
-                        -- Kita mengabaikan logika short/long message di sini.
-                        -- Selalu ambil Data Blok 1 (128-bit) dan Tag (128-bit).
+                        -- Ambil data dari register hasil yang sudah stabil
+                        tx_data_buffer(255 downto 128) <= r_result_data;
                         
-                        -- Slot 1: Data (Ciphertext/Plaintext)
-                        tx_data_buffer(383 downto 256) <= r_result_data(255 downto 128); 
-                        -- Slot 2: Tag
-                        tx_data_buffer(255 downto 128) <= r_result_tag;
-                        
-                        -- Set Total Kirim: 32 Byte
-                        tx_total_bytes <= 32;
+                        if w_is_decrypt = '0' then
+                            -- Mode ENCRYPT: Kirim Data (16) + Tag (16) = 32 Byte
+                            tx_data_buffer(127 downto 0) <= r_result_tag;
+                            tx_total_bytes <= 32;
+                        else
+                            -- Mode DECRYPT SUKSES: Kirim Data (16) = 16 Byte
+                            tx_total_bytes <= 16;
+                        end if;
                         
                         tx_state <= TX_LOAD_MSG;
                         
+                    -- Pemicu: Controller mendeteksi Tag Invalid
                     elsif w_ctrl_error = '1' then
-                        tx_data_buffer(383 downto 264) <= MSG_ERROR_HEX; 
-                        tx_total_bytes <= 15;
+                        -- Isi buffer dengan pesan "Tag Tidak Valid"
+                        tx_data_buffer(255 downto 136) <= MSG_ERROR_HEX; 
+                        tx_data_buffer(135 downto 0)   <= (others => '0');
+                        
+                        tx_total_bytes <= 15; -- Panjang string "Tag Tidak Valid"
                         tx_state       <= TX_LOAD_ERROR;
                     end if;
 
                 when TX_LOAD_MSG | TX_LOAD_ERROR =>
-                    led_ready <= '1';
+                    led_ready <= '1'; -- Indikator data siap dikirim balik
                     tx_state  <= TX_SENDING;
 
                 when TX_SENDING =>
-                    -- Logika pengiriman (MSB First secara global, tapi per-byte)
-                    w_tx_byte  <= tx_data_buffer(383 - (tx_byte_cnt * 8) downto 383 - (tx_byte_cnt * 8) - 7);
+                    -- Mengirim byte per byte (MSB First)
+                    w_tx_byte  <= tx_data_buffer(255 - (tx_byte_cnt * 8) downto 255 - (tx_byte_cnt * 8) - 7);
                     w_tx_start <= '1';
                     tx_state   <= TX_WAIT_BYTE;
 
                 when TX_WAIT_BYTE =>
+                    -- Tunggu sinyal done dari modul UART TX fisik
                     if w_tx_done_tick = '1' then
                         if tx_byte_cnt = (tx_total_bytes - 1) then
                             tx_state <= TX_DONE;
@@ -190,8 +212,8 @@ begin
 
                 when TX_DONE =>
                     led_ready <= '1';
-                    -- Idle sampai reset
-                    
+                    -- State terminal, sistem menunggu reset untuk operasi baru
+                
                 when others =>
                     tx_state <= TX_IDLE;
             end case;
