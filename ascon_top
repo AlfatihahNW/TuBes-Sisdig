@@ -54,7 +54,7 @@ architecture Behavioral of ascon_top is
     signal w_ctrl_done    : std_logic; 
     signal w_ctrl_error   : std_logic; 
     
-    -- Register Hasil (Penting untuk stabilitas UART)
+    -- Register Hasil
     signal r_result_data  : std_logic_vector(127 downto 0);
     signal r_result_tag   : std_logic_vector(127 downto 0);
     
@@ -112,7 +112,7 @@ begin
     inst_uart_tx : entity work.uart_tx 
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_TX_DV => w_tx_start, i_TX_Byte => w_tx_byte, o_TX_Active => w_tx_busy, o_TX_Serial => uart_tx_pin, o_TX_Done => w_tx_done_tick );
 
-    -- 6. CONTROLLER (Menggunakan perbaikan ST_WAIT_S)
+    -- 6. CONTROLLER
     inst_controller : entity work.ascon_controller
     port map (
         clk => clk, rst_n => rst_n, buffer_full => w_buffer_full, btn_encrypt => w_btn_encrypt_db, btn_decrypt => w_btn_decrypt_db, 
@@ -122,20 +122,20 @@ begin
     );
     
     -- 7. PENYIMPAN HASIL (DATA + TAG)
-    -- Perbaikan: Sinkronisasi penangkapan hasil dengan state controller
     process(clk, rst_n)
     begin
         if rst_n = '0' then
             r_result_data <= (others => '0');
             r_result_tag  <= (others => '0');
         elsif rising_edge(clk) then
-            -- Simpan Data (Ciphertext / Plaintext) saat state pengerjaan data aktif
+            -- Simpan Data (Ciphertext / Plaintext) 
+            -- Ditangkap saat Datapath sedang memproses data (ST_DATA_XOR)
             if w_en_si = '1' and w_mux_sel = "011" then
                 r_result_data <= w_out_data;
             end if;
             
-            -- Simpan Tag saat controller selesai melakukan verifikasi/finalisasi
-            -- Kita gunakan w_ctrl_done sebagai trigger stabil
+            -- Simpan Tag (Opsional, untuk debug/memori)
+            -- Ditangkap saat controller selesai
             if w_ctrl_done = '1' or w_ctrl_error = '1' then 
                 r_result_tag <= w_out_tag; 
             end if;
@@ -143,7 +143,7 @@ begin
     end process;
 
     -- =========================================================================
-    -- 8. UART SERIALIZER
+    -- 8. UART SERIALIZER (REVISI PERBAIKAN TIMING)
     -- =========================================================================
     process(clk, rst_n)
     begin
@@ -163,29 +163,36 @@ begin
                     tx_byte_cnt <= 0;
                     led_ready   <= '0';
                     
-                    -- Pemicu: Controller selesai tanpa error
+                    -- KASUS 1: SUKSES (Encrypt atau Valid Decrypt)
                     if w_ctrl_done = '1' then
-                        -- Ambil data dari register hasil yang sudah stabil
+                        
+                        -- Slot 1 (Atas): Data Hasil (CT/PT)
+                        -- Ambil dari register 'r_result_data' yang sudah stabil (disimpan sejak ST_DATA_XOR)
                         tx_data_buffer(255 downto 128) <= r_result_data;
                         
                         if w_is_decrypt = '0' then
-                            -- Mode ENCRYPT: Kirim Data (16) + Tag (16) = 32 Byte
-                            tx_data_buffer(127 downto 0) <= r_result_tag;
-                            tx_total_bytes <= 32;
+                            -- === MODE ENCRYPT ===
+                            -- PERBAIKAN DISINI: 
+                            -- JANGAN ambil dari r_result_tag karena berisiko Race Condition (sedang ditulis).
+                            -- AMBIL langsung dari WIRE 'w_out_tag' yang sudah valid dan stabil di kabel.
+                            tx_data_buffer(127 downto 0) <= w_out_tag;
+                            
+                            tx_total_bytes <= 32; -- Kirim 32 Byte (Data + Tag)
                         else
-                            -- Mode DECRYPT SUKSES: Kirim Data (16) = 16 Byte
+                            -- === MODE DECRYPT ===
+                            -- Hanya kirim Plaintext (16 Byte). Slot bawah diabaikan.
                             tx_total_bytes <= 16;
                         end if;
                         
                         tx_state <= TX_LOAD_MSG;
                         
-                    -- Pemicu: Controller mendeteksi Tag Invalid
+                    -- KASUS 2: ERROR (Tag Invalid saat Decrypt)
                     elsif w_ctrl_error = '1' then
                         -- Isi buffer dengan pesan "Tag Tidak Valid"
                         tx_data_buffer(255 downto 136) <= MSG_ERROR_HEX; 
                         tx_data_buffer(135 downto 0)   <= (others => '0');
                         
-                        tx_total_bytes <= 15; -- Panjang string "Tag Tidak Valid"
+                        tx_total_bytes <= 15; 
                         tx_state       <= TX_LOAD_ERROR;
                     end if;
 
@@ -200,7 +207,6 @@ begin
                     tx_state   <= TX_WAIT_BYTE;
 
                 when TX_WAIT_BYTE =>
-                    -- Tunggu sinyal done dari modul UART TX fisik
                     if w_tx_done_tick = '1' then
                         if tx_byte_cnt = (tx_total_bytes - 1) then
                             tx_state <= TX_DONE;
@@ -212,7 +218,7 @@ begin
 
                 when TX_DONE =>
                     led_ready <= '1';
-                    -- State terminal, sistem menunggu reset untuk operasi baru
+                    -- Diam menunggu reset
                 
                 when others =>
                     tx_state <= TX_IDLE;
