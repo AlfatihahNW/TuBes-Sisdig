@@ -18,9 +18,9 @@ entity ascon_top is
         btn_decrypt   : in  STD_LOGIC;
         
         -- --- LAMPU INDIKATOR (Active Low) ---
-        led_loading   : out STD_LOGIC; 
-        led_process   : out STD_LOGIC; -- INI BERFUNGSI SEBAGAI LED DONE
-        led_ready     : out STD_LOGIC  
+        led_loading   : out STD_LOGIC; -- Indikator sedang mengisi buffer
+        led_process   : out STD_LOGIC; -- Indikator DONE (Selesai kirim balik)
+        led_ready     : out STD_LOGIC  -- Indikator Siap (Buffer kosong)
     );
 end ascon_top;
 
@@ -53,7 +53,6 @@ architecture Behavioral of ascon_top is
     -- Status Controller
     signal w_ctrl_done    : std_logic; 
     signal w_ctrl_error   : std_logic;
-    -- Note: led_busy dari controller tidak dipakai langsung ke pin luar
     signal w_ctrl_busy    : std_logic; 
 
     -- Register Hasil
@@ -72,13 +71,12 @@ architecture Behavioral of ascon_top is
     signal w_tx_busy      : std_logic;
 
     constant MSG_ERROR_HEX : std_logic_vector(119 downto 0) := x"54616720546964616B2056616C6964"; 
-    -- "Tag Tidak Valid"
     
     signal w_btn_encrypt_db : std_logic;
     signal w_btn_decrypt_db : std_logic;
 
-    -- Flag untuk Logika LED Baru
-    signal r_reception_started : std_logic := '0';
+    -- Flag untuk Logika LED
+    signal r_has_data : std_logic := '0'; -- '1' jika buffer setidaknya berisi 1 byte
 
 begin
 
@@ -131,12 +129,9 @@ begin
             r_result_data <= (others => '0');
             r_result_tag  <= (others => '0');
         elsif rising_edge(clk) then
-            -- Simpan Data (Ciphertext / Plaintext) 
             if w_en_si = '1' and w_mux_sel = "011" then
                 r_result_data <= w_out_data;
             end if;
-            
-            -- Simpan Tag (Saat controller selesai/error)
             if w_ctrl_done = '1' or w_ctrl_error = '1' then 
                 r_result_tag <= w_out_tag;
             end if;
@@ -146,36 +141,39 @@ begin
     -- =========================================================================
     -- 8. MANAJEMEN LED (LOGIKA BARU - ACTIVE LOW)
     -- =========================================================================
-    -- led_ready   : Nyala saat reset, Mati saat byte pertama masuk.
-    -- led_loading : Nyala saat byte pertama masuk, Mati saat buffer penuh.
-    -- led_process : (Fungsi DONE) Mati saat awal, Nyala saat TX UART selesai.
-    
     process(clk, rst_n)
     begin
         if rst_n = '0' then
-            r_reception_started <= '0';
-            led_ready           <= '0'; -- ON (Active Low)
-            led_loading         <= '1'; -- OFF (Active Low)
+            r_has_data  <= '0';
+            led_ready   <= '0'; -- RESET: Ready ON (0)
+            led_loading <= '1'; -- RESET: Loading OFF (1)
         elsif rising_edge(clk) then
             
-            -- Deteksi penerimaan byte pertama
+            -- Deteksi masuknya byte pertama (artinya buffer tidak kosong lagi)
             if w_rx_dv = '1' then
-                r_reception_started <= '1';
+                r_has_data <= '1';
+            end if;
+
+            -- LOGIKA LED LOADING
+            -- Aturan: 
+            --   - Buffer Full   -> OFF
+            --   - Buffer Berisi (r_has_data=1) -> ON
+            --   - Buffer Kosong (r_has_data=0) -> OFF
+            
+            if w_buffer_full = '1' then
+                led_loading <= '1'; -- Buffer penuh -> Mati
+            elsif r_has_data = '1' then
+                led_loading <= '0'; -- Ada isi tapi belum penuh -> Nyala
+            else
+                led_loading <= '1'; -- Buffer kosong -> Mati
             end if;
             
             -- LOGIKA LED READY
-            if r_reception_started = '0' then
-                led_ready <= '0'; -- Nyala (Belum ada data masuk)
+            -- Mati segera setelah ada data pertama masuk
+            if r_has_data = '1' then
+                led_ready <= '1'; -- Mati
             else
-                led_ready <= '1'; -- Mati (Sudah ada data masuk)
-            end if;
-            
-            -- LOGIKA LED LOADING
-            -- Nyala jika sudah mulai terima data TAPI buffer belum penuh
-            if r_reception_started = '1' and w_buffer_full = '0' then
-                led_loading <= '0'; -- Nyala
-            else
-                led_loading <= '1'; -- Mati
+                led_ready <= '0'; -- Nyala (Masih kosong/Reset)
             end if;
             
         end if;
@@ -191,7 +189,7 @@ begin
             tx_byte_cnt     <= 0;
             w_tx_start      <= '0';
             tx_data_buffer  <= (others => '0');
-            led_process     <= '1'; -- LED DONE default OFF (Active Low)
+            led_process     <= '1'; -- LED DONE default OFF
         elsif rising_edge(clk) then
             w_tx_start <= '0';
             
@@ -199,33 +197,21 @@ begin
                 
                 when TX_IDLE =>
                     tx_byte_cnt <= 0;
-                    led_process <= '1'; -- Pastikan LED Done mati saat Idle/Reset
+                    led_process <= '1'; 
                     
-                    -- KASUS 1: SUKSES (Encrypt atau Valid Decrypt)
                     if w_ctrl_done = '1' then
-                        -- Ambil Data Hasil
                         tx_data_buffer(255 downto 128) <= r_result_data;
-
                         if w_is_decrypt = '0' then
-                            -- === MODE ENCRYPT ===
-                            -- Kirim CT + Tag
-                            -- Gunakan w_out_tag langsung agar data fresh
                             tx_data_buffer(127 downto 0) <= w_out_tag;
                             tx_total_bytes <= 32; 
                         else
-                            -- === MODE DECRYPT ===
-                            -- Kirim Plaintext saja (Tag valid, tidak dikirim balik)
                             tx_total_bytes <= 16;
                         end if;
-                        
                         tx_state <= TX_LOAD_MSG;
                         
-                    -- KASUS 2: ERROR (Tag Invalid saat Decrypt)
                     elsif w_ctrl_error = '1' then
-                        -- Isi buffer dengan pesan "Tag Tidak Valid"
                         tx_data_buffer(255 downto 136) <= MSG_ERROR_HEX;
                         tx_data_buffer(135 downto 0)   <= (others => '0');
-                        
                         tx_total_bytes <= 15;
                         tx_state       <= TX_LOAD_ERROR;
                     end if;
@@ -234,7 +220,6 @@ begin
                     tx_state  <= TX_SENDING;
 
                 when TX_SENDING =>
-                    -- Mengirim byte per byte (MSB First)
                     w_tx_byte  <= tx_data_buffer(255 - (tx_byte_cnt * 8) downto 255 - (tx_byte_cnt * 8) - 7);
                     w_tx_start <= '1';
                     tx_state   <= TX_WAIT_BYTE;
@@ -250,9 +235,7 @@ begin
                     end if;
                 
                 when TX_DONE =>
-                    -- PENGIRIMAN SELESAI
-                    led_process <= '0'; -- Nyalakan LED Done (Active Low)
-                    -- Tetap di state ini sampai reset
+                    led_process <= '0'; -- DONE menyala (Active Low)
                 
                 when others =>
                     tx_state <= TX_IDLE;
