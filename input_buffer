@@ -4,18 +4,18 @@ use IEEE.NUMERIC_STD.ALL;
 
 entity input_buffer is
     Port ( 
+        -- INPUT
         clk, rst_n, rx_valid : in STD_LOGIC;
         rx_data : in STD_LOGIC_VECTOR (7 downto 0);
 
-        -- OUTPUTS (Semua 128-bit)
+        -- OUTPUT
         reg_key      : out STD_LOGIC_VECTOR (127 downto 0);
         reg_nonce    : out STD_LOGIC_VECTOR (127 downto 0);
         reg_ad       : out STD_LOGIC_VECTOR (127 downto 0);
-        
         reg_data     : out STD_LOGIC_VECTOR (127 downto 0); 
-        
         reg_tag_in   : out STD_LOGIC_VECTOR (127 downto 0);
-        buffer_full  : out STD_LOGIC
+        buffer_full  : out STD_LOGIC;
+        is_loading   : out STD_LOGIC 
     );
 end input_buffer;
 
@@ -24,41 +24,33 @@ architecture Behavioral of input_buffer is
     signal r_mem : mem_type := (others => (others => '0'));
     
     signal r_byte_cnt : integer range 0 to 127 := 0;
-    -- Timer dihapus, diganti flag simple
     signal r_data_ready : std_logic := '0';
 
 begin
-
     process(clk, rst_n)
     begin
         if rst_n = '0' then
             r_byte_cnt <= 0;
-            r_data_ready <= '0'; -- Reset status ready
+            r_data_ready <= '0';
             r_mem <= (others => (others => '0'));
-            
         elsif rising_edge(clk) then
             if rx_valid = '1' then
-                -- Batas terima data 80 byte
                 if r_byte_cnt < 80 then 
                     r_mem(r_byte_cnt) <= rx_data;
-                    
-                    -- LOGIKA BARU: Cek apakah ini byte terakhir (ke-80, index 79)?
                     if r_byte_cnt = 79 then
-                        r_data_ready <= '1'; -- Selesai! Paket lengkap.
+                        r_data_ready <= '1';
                     end if;
-                    
                     r_byte_cnt <= r_byte_cnt + 1; 
                 end if;
             end if;
-            -- Tidak ada lagi logic 'else' timeout. 
-            -- FPGA akan setia menunggu byte ke-80 selamanya jika perlu.
         end if;
     end process;
 
-    -- Output buffer_full hanya aktif jika SUDAH TERIMA 80 BYTE
-    buffer_full <= r_data_ready; 
+    buffer_full <= r_data_ready;
 
-    -- === MAPPING DATA (Tetap Sama) ===
+    is_loading <= '1' when (r_byte_cnt > 0 and r_data_ready = '0') else '0';
+
+    -- MAPPING DATA
     reg_key <= r_mem(0)  & r_mem(1)  & r_mem(2)  & r_mem(3)  & 
                r_mem(4)  & r_mem(5)  & r_mem(6)  & r_mem(7)  &
                r_mem(8)  & r_mem(9)  & r_mem(10) & r_mem(11) & 
