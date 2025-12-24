@@ -18,9 +18,9 @@ entity ascon_top is
         btn_decrypt   : in  STD_LOGIC;
         
         -- --- LAMPU INDIKATOR (Active Low) ---
-        led_loading   : out STD_LOGIC; -- Indikator sedang mengisi buffer
-        led_process   : out STD_LOGIC; -- Indikator DONE
-        led_ready     : out STD_LOGIC  -- Indikator Ready (Buffer Kosong)
+        led_loading   : out STD_LOGIC; -- Menyala saat buffer terisi sebagian (1-79)
+        led_process   : out STD_LOGIC; -- DONE (Selesai kirim balik)
+        led_ready     : out STD_LOGIC  -- READY (Buffer Kosong / 0)
     );
 end ascon_top;
 
@@ -35,6 +35,9 @@ architecture Behavioral of ascon_top is
     signal w_tag_in       : std_logic_vector(127 downto 0);
     signal w_data_in      : std_logic_vector(127 downto 0); 
     signal w_buffer_full  : std_logic;
+    
+    -- [BARU] Sinyal dari Input Buffer
+    signal w_buf_is_loading : std_logic; 
 
     -- Sinyal Kontrol Internal
     signal w_en_si        : std_logic;
@@ -75,9 +78,6 @@ architecture Behavioral of ascon_top is
     signal w_btn_encrypt_db : std_logic;
     signal w_btn_decrypt_db : std_logic;
 
-    -- Flag State LED (KUNCI UTAMA PERBAIKAN)
-    signal r_is_loading     : std_logic := '0'; -- '1' = Sedang mengisi, '0' = Kosong atau Penuh
-
 begin
 
     -- 1. INPUT DEBOUNCERS
@@ -91,13 +91,15 @@ begin
     inst_uart_rx : entity work.uart_rx 
     port map ( i_Clk => clk, i_Rst_n => rst_n, i_RX_Serial => uart_rx_pin, o_RX_DV => w_rx_dv, o_RX_Byte => w_rx_byte );
 
-    -- 3. INPUT BUFFER
+    -- 3. INPUT BUFFER (Updated Port Map)
     inst_buffer : entity work.input_buffer 
     port map (
         clk => clk, rst_n => rst_n, rx_data => w_rx_byte, rx_valid => w_rx_dv,
         reg_key => w_key, reg_nonce => w_nonce, reg_ad => w_ad, 
         reg_data => w_data_in, 
-        reg_tag_in => w_tag_in, buffer_full => w_buffer_full
+        reg_tag_in => w_tag_in, 
+        buffer_full => w_buffer_full,
+        is_loading  => w_buf_is_loading -- [BARU] Sinyal Loading Langsung dari Buffer
     );
     
     -- 4. DATAPATH
@@ -139,47 +141,18 @@ begin
     end process;
 
     -- =========================================================================
-    -- 8. MANAJEMEN LED (PERBAIKAN LOGIKA LATCHING)
+    -- 8. MANAJEMEN LED (DIRECT MAPPING DARI BUFFER STATUS)
     -- =========================================================================
-    process(clk, rst_n)
-    begin
-        if rst_n = '0' then
-            r_is_loading <= '0';
-            led_loading  <= '1'; -- OFF (Active Low)
-            led_ready    <= '0'; -- ON (Reset = Ready)
-        elsif rising_edge(clk) then
-            
-            -- LOGIKA STATE LOADING (PRIORITAS PENTING)
-            -- 1. Jika Buffer Penuh -> Paksa Loading berhenti.
-            if w_buffer_full = '1' then
-                r_is_loading <= '0';
-                
-            -- 2. Jika tidak penuh DAN ada data masuk -> Aktifkan Loading.
-            --    Sinyal ini akan terkunci (LATCH) jadi '1' dan tidak akan kembali ke '0'
-            --    meskipun w_rx_dv mati, sampai buffer penuh atau reset.
-            elsif w_rx_dv = '1' then
-                r_is_loading <= '1';
-            end if;
+    -- Logika Active Low ('0' = ON, '1' = OFF)
+    
+    -- LED LOADING:
+    -- Nyala ('0') jika input_buffer bilang "is_loading" ('1')
+    led_loading <= not w_buf_is_loading; 
 
-            -- MAPPING KE OUTPUT LED (Active Low: '0'=Nyala, '1'=Mati)
-            
-            -- LED Loading: Nyala hanya jika r_is_loading = 1
-            if r_is_loading = '1' then
-                led_loading <= '0'; -- ON
-            else
-                led_loading <= '1'; -- OFF
-            end if;
-            
-            -- LED Ready: Nyala jika belum ada aktifitas loading sama sekali dan buffer belum penuh
-            -- Begitu loading mulai (r_is_loading=1) atau selesai (w_buffer_full=1), Ready mati.
-            if r_is_loading = '0' and w_buffer_full = '0' then
-                led_ready <= '0'; -- ON
-            else
-                led_ready <= '1'; -- OFF
-            end if;
-            
-        end if;
-    end process;
+    -- LED READY:
+    -- Nyala ('0') hanya jika buffer TIDAK loading DAN buffer TIDAK penuh (artinya kosong/0)
+    -- OFF ('1') jika sedang loading ATAU sudah penuh.
+    led_ready <= '0' when (w_buf_is_loading = '0' and w_buffer_full = '0') else '1';
 
     -- =========================================================================
     -- 9. UART SERIALIZER & LED DONE
@@ -199,7 +172,7 @@ begin
                 
                 when TX_IDLE =>
                     tx_byte_cnt <= 0;
-                    led_process <= '1'; 
+                    led_process <= '1'; -- LED Done MATI saat Reset/Idle awal
                     
                     if w_ctrl_done = '1' then
                         tx_data_buffer(255 downto 128) <= r_result_data;
@@ -237,7 +210,8 @@ begin
                     end if;
                 
                 when TX_DONE =>
-                    led_process <= '0'; 
+                    led_process <= '0'; -- LED DONE NYALA
+                    -- Tetap diam di sini sampai Reset
                 
                 when others =>
                     tx_state <= TX_IDLE;
