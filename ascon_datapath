@@ -1,6 +1,5 @@
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
--- Pastikan package ini ada dan sesuai
 use work.ascon_pkg.ALL; 
 
 entity ascon_datapath is
