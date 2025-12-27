@@ -9,7 +9,7 @@ entity ascon_controller is
         btn_encrypt      : in STD_LOGIC;
         btn_decrypt      : in STD_LOGIC;
         perm_done        : in STD_LOGIC;
-        tag_valid        : in STD_LOGIC; -- Input hasil perbandingan Tag (dari Datapath)
+        tag_valid        : in STD_LOGIC;
         
         -- Output Control Signals
         en_SI            : out STD_LOGIC;
@@ -26,10 +26,12 @@ end ascon_controller;
 
 architecture Behavioral of ascon_controller is
     type state_type is (
-        ST_IDLE, ST_RX_WAIT, ST_BTN_WAIT, 
+        ST_IDLE, ST_RX_WAIT, ST_BTN_WAIT,
+
+        -- State Initialization
         ST_INIT_LOAD, ST_INIT_PERM_TRIG, ST_INIT_PERM_WAIT, ST_INIT_XOR_KEY,
         
-        -- State AD (Associated Data)
+        -- State AD
         ST_AD_XOR, ST_AD_PERM_TRIG, ST_AD_PERM_WAIT, ST_DOM_SEP,
         
         -- State Data Processing
@@ -37,7 +39,7 @@ architecture Behavioral of ascon_controller is
         
         -- State Finalization
         ST_FINAL_XOR_KEY, ST_FINAL_PERM_TRIG, ST_FINAL_PERM_WAIT, 
-        ST_WAIT_S,      -- STATE BARU: Menunggu register S stabil
+        ST_WAIT_S, -- Untuk tnggu satu clk, biar pengecekkan tag aman
         ST_CHECK_TAG, 
         ST_DONE, 
         ST_ERROR
@@ -52,125 +54,124 @@ begin
     process(clk, rst_n)
     begin
         if rst_n = '0' then
-            state <= ST_IDLE; 
+            state <= ST_IDLE;
             r_is_decrypt <= '0';
-            en_SI <= '0'; mux_sel <= "000"; en_xor_lsb <= '0'; 
-            start_perm <= '0'; round_mode <= '0'; 
-            led_busy <= '0'; led_done <= '0';
+            en_SI <= '0';
+            mux_sel <= "000";
+            en_xor_lsb <= '0';
+            start_perm <= '0';
+            round_mode <= '0';
+            led_busy <= '0';
+            led_done <= '0';
         elsif rising_edge(clk) then
-            -- Default Pulse Values (Menghindari Latch)
-            en_SI <= '0'; 
-            start_perm <= '0'; 
-            en_xor_lsb <= '0'; 
+            en_SI <= '0';
+            start_perm <= '0';
+            en_xor_lsb <= '0';
 
             case state is
-                when ST_IDLE => 
-                    state <= ST_RX_WAIT; 
+                when ST_IDLE =>
+                    state <= ST_RX_WAIT;
                     led_done <= '0';
                     led_busy <= '0';
                     
-                when ST_RX_WAIT => 
-                    if buffer_full = '1' then 
-                        state <= ST_BTN_WAIT; 
+                when ST_RX_WAIT =>
+                    if buffer_full = '1' then
+                        state <= ST_BTN_WAIT;
                     end if;
                     
                 when ST_BTN_WAIT =>
-                    if btn_encrypt = '1' then 
-                        r_is_decrypt <= '0'; 
-                        state <= ST_INIT_LOAD; 
+                    if btn_encrypt = '1' then
+                        r_is_decrypt <= '0';
+                        state <= ST_INIT_LOAD;
                         led_busy <= '1';
-                    elsif btn_decrypt = '1' then 
-                        r_is_decrypt <= '1'; 
-                        state <= ST_INIT_LOAD; 
-                        led_busy <= '1'; 
+                    elsif btn_decrypt = '1' then
+                        r_is_decrypt <= '1';
+                        state <= ST_INIT_LOAD;
+                        led_busy <= '1';
                     end if;
 
-                -- === 1. INITIALIZATION ===
-                when ST_INIT_LOAD => 
-                    mux_sel <= "000"; 
-                    en_SI <= '1'; 
+                -- 1. INITIALIZATION
+                when ST_INIT_LOAD =>
+                    mux_sel <= "000";
+                    en_SI <= '1';
                     state <= ST_INIT_PERM_TRIG;
                 
                 when ST_INIT_PERM_TRIG => 
-                    round_mode <= '0'; -- 12 Rounds
-                    start_perm <= '1'; 
+                    round_mode <= '0';
+                    start_perm <= '1';
                     state <= ST_INIT_PERM_WAIT;
                     
-                when ST_INIT_PERM_WAIT => 
+                when ST_INIT_PERM_WAIT =>
                     round_mode <= '0';
-                    if perm_done = '1' then 
-                        mux_sel <= "001"; -- Ambil hasil permutasi
-                        en_SI <= '1'; 
-                        state <= ST_INIT_XOR_KEY; 
+                    if perm_done = '1' then
+                        mux_sel <= "001";
+                        en_SI <= '1';
+                        state <= ST_INIT_XOR_KEY;
                     end if;
 
                 when ST_INIT_XOR_KEY =>
-                    mux_sel <= "101"; -- S ^ (0k || K)
-                    en_SI <= '1'; 
-                    state <= ST_AD_XOR; 
-                
-                -- === 2. ASSOCIATED DATA (AD) ===
-                when ST_AD_XOR => 
-                    mux_sel <= "010"; 
-                    en_SI <= '1'; 
+                    mux_sel <= "101";
+                    en_SI <= '1';
+                    state <= ST_AD_XOR;
+
+                -- 2. ASSOCIATED DATA (AD)
+                when ST_AD_XOR =>
+                    mux_sel <= "010";
+                    en_SI <= '1';
                     state <= ST_AD_PERM_TRIG;
                 
-                when ST_AD_PERM_TRIG => 
-                    round_mode <= '1'; -- 8 Rounds (Ascon-128a)
-                    start_perm <= '1'; 
+                when ST_AD_PERM_TRIG =>
+                    round_mode <= '1';
+                    start_perm <= '1';
                     state <= ST_AD_PERM_WAIT;
                     
-                when ST_AD_PERM_WAIT => 
+                when ST_AD_PERM_WAIT =>
                     round_mode <= '1';
-                    if perm_done = '1' then 
-                        mux_sel <= "001"; 
-                        en_SI <= '1'; 
-                        state <= ST_DOM_SEP; 
+                    if perm_done = '1' then
+                        mux_sel <= "001";
+                        en_SI <= '1';
+                        state <= ST_DOM_SEP;
                     end if;
-                
-                -- === 3. DOMAIN SEPARATION ===
-                when ST_DOM_SEP => 
-                    en_xor_lsb <= '1'; -- S ^ 1
+
+                -- 3. DOMAIN SEPARATION
+                when ST_DOM_SEP =>
+                    en_xor_lsb <= '1';
                     state <= ST_DATA_XOR;
 
-                -- === 4. DATA PROCESSING ===
-                when ST_DATA_XOR => 
-                    mux_sel <= "011"; 
-                    en_SI <= '1'; 
-                    state <= ST_FINAL_XOR_KEY; 
+                -- 4. DATA PROCESSING
+                when ST_DATA_XOR =>
+                    mux_sel <= "011";
+                    en_SI <= '1';
+                    state <= ST_FINAL_XOR_KEY;
 
-                -- === 5. FINALIZATION ===
-                when ST_FINAL_XOR_KEY => 
-                    mux_sel <= "100"; -- S ^ K
-                    en_SI <= '1'; 
+                -- 5. FINALIZATION
+                when ST_FINAL_XOR_KEY =>
+                    mux_sel <= "100";
+                    en_SI <= '1';
                     state <= ST_FINAL_PERM_TRIG;
-                
-                when ST_FINAL_PERM_TRIG => 
-                    round_mode <= '0'; -- 12 Rounds
-                    start_perm <= '1'; 
+
+                when ST_FINAL_PERM_TRIG =>
+                    round_mode <= '0';
+                    start_perm <= '1';
                     state <= ST_FINAL_PERM_WAIT;
                     
-                when ST_FINAL_PERM_WAIT => 
+                when ST_FINAL_PERM_WAIT =>
                     round_mode <= '0';
-                    if perm_done = '1' then 
-                        mux_sel <= "001"; -- Ambil hasil permutasi
-                        en_SI <= '1';     -- Trigger penulisan ke register S
-                        state <= ST_WAIT_S; -- JANGAN langsung cek, tunggu register update
+                    if perm_done = '1' then
+                        mux_sel <= "001";
+                        en_SI <= '1';
+                        state <= ST_WAIT_S;
                     end if;
 
-                -- === STATE PENYEIMBANG TIMING ===
+                -- STATE BUFFER TIMING
                 when ST_WAIT_S =>
-                    -- State ini memberi waktu 1 clock cycle agar register S 
-                    -- di Datapath menangkap data dari perm_out_wire.
-                    -- Pada cycle ini, sinyal tag_valid akan menjadi stabil.
                     state <= ST_CHECK_TAG;
 
-                -- === 6. VERIFICATION & DECISION ===
+                -- 6. VERIFICATION
                 when ST_CHECK_TAG =>
                     if r_is_decrypt = '0' then
                         state <= ST_DONE;
                     else
-                        -- Sampling tag_valid yang sudah stabil setelah ST_WAIT_S
                         if tag_valid = '1' then
                             state <= ST_DONE; 
                         else
@@ -181,12 +182,10 @@ begin
                 when ST_DONE => 
                     led_busy <= '0'; 
                     led_done <= '1';
-                    -- Tetap di sini sampai sistem di-reset
                     
                 when ST_ERROR => 
                     led_busy <= '0';
                     led_done <= '0';
-                    -- Tetap di sini untuk mengunci status error
                     
                 when others => 
                     state <= ST_IDLE;
@@ -194,7 +193,6 @@ begin
         end if;
     end process;
     
-    -- Output status error ke Top Level
     status_error <= '1' when state = ST_ERROR else '0';
 
 end Behavioral;
