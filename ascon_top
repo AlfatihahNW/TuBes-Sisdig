@@ -79,15 +79,18 @@ architecture Behavioral of ascon_top is
     -- Sinyal Tombol
     signal w_btn_encrypt_db : std_logic;
     signal w_btn_decrypt_db : std_logic;
+    signal w_btn_encrypt_inv: std_logic;
+    signal w_btn_decrypt_inv: std_logic;
 
 begin
-
+    w_btn_encrypt_inv <= not btn_encrypt;
+    w_btn_decrypt_inv <= not btn_decrypt;
     -- 1. INPUT DEBOUNCERS
     inst_db_enc : entity work.debouncer
     port map (
         clk => clk,
         rst_n => rst_n,
-        btn_in => not btn_encrypt,
+        btn_in => w_btn_encrypt_inv,
         btn_out => w_btn_encrypt_db 
     );
     
@@ -95,7 +98,7 @@ begin
     port map ( 
         clk => clk,
         rst_n => rst_n,
-        btn_in => not btn_decrypt,
+        btn_in => w_btn_decrypt_inv,
         btn_out => w_btn_decrypt_db 
     );
 
