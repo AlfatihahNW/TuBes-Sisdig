@@ -3,7 +3,7 @@ library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
 
 package ascon_pkg is
-    -- IV ASCON-128 (Sesuai Test Vector kamu)
+    -- IV ASCON-128a
     constant ASCON_IV : std_logic_vector(63 downto 0) := x"80800c0800000000";
 
     -- Array Konstanta Ronde
